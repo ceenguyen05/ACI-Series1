@@ -1,6 +1,6 @@
 {
   "name": "aci-snd",
-  "version": "1.7.7",
+  "version": "1.8.0",
   "private": true,
   "description": "ACI: Search & Destroy - a CS-style tactical shooter on two office maps (ACI HQ and ACI Building 2), built with Three.js",
   "homepage": "https://ceenguyen05.github.io/ACI-SND/",
