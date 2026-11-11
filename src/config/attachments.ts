@@ -243,8 +243,8 @@ export function deriveDef(id: WeaponId, eq: Loadout | undefined): WeaponDef {
     spread: {
       ...base.spread,
       base: shotgun ? base.spread.base * m.pellet : base.spread.base,
-      stand: base.spread.stand * m.hip,
-      crouch: base.spread.crouch * m.hip,
+      // hip-fire only: inaccuracy() applies it to the stance spread when you are not aiming
+      hip: m.hip,
       move: base.spread.move * m.moveSpread,
       recovery: base.spread.recovery * m.recovery,
     },

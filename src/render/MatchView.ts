@@ -20,6 +20,9 @@ import { ZombieModel } from './ZombieModel';
 import type { GameRenderer } from './Renderer';
 import { bombModel, grenadeModel, weaponModel } from './WeaponModels';
 import type { PaperDollMode } from './PaperDoll';
+import { ThrowPreview } from './ThrowPreview';
+import type { CasingKind } from './Effects';
+import type { WeaponDef } from '../config/weapons';
 
 interface CharEntry {
   model: CharacterModel | ZombieModel; prev: Vector3; cur: Vector3; xray: Group; firing: number; light: Color; hitAt: number; throwAt: number; shadow: Mesh;
@@ -29,10 +32,19 @@ interface CharEntry {
 
 const lerpAngle = (a: number, b: number, t: number) => a + wrapAngle(b - a) * t;
 const v3 = (v: Vector3): [number, number, number] => [v.x, v.y, v.z];
+const _dust = new Vector3();
 const SHADOW_GEO = new PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
 let shadowMat: MeshBasicMaterial | null = null;
 
-export interface ViewSettings { fov: number; viewmodelFov: number; leftHanded: boolean; paperDoll?: PaperDollMode; paperDollSize?: number }
+export interface ViewSettings { fov: number; viewmodelFov: number; leftHanded: boolean; paperDoll?: PaperDollMode; paperDollSize?: number; grenadePreview?: boolean }
+
+/** How a gun throws its spent case: what it looks like, and how long after the shot (manual actions eject on the cycle). */
+function ejection(def: WeaponDef): { kind: CasingKind; delay: number } | null {
+  if (def.projectile || def.class === 'knife' || def.class === 'launcher' || def.sound === 'energy') return null;
+  if (def.class === 'shotgun') return { kind: 'shell', delay: def.auto ? 0 : 0.34 };
+  if (def.class === 'sniper') return { kind: 'brass', delay: def.scope?.stay ? 0 : 0.5 };
+  return { kind: def.class === 'pistol' || def.class === 'smg' ? 'small' : 'brass', delay: 0 };
+}
 
 /** Convert CS-style horizontal FOV at 4:3 into a vertical FOV. */
 export const verticalFov = (hfov43: number) => 2 * Math.atan(Math.tan((hfov43 * DEG) / 2) * 0.75) / DEG;
@@ -105,7 +117,18 @@ export class MatchView {
   onLocalHurt: (fromYaw: number) => void = () => {};
   onLocalFlash: (strength: number, duration: number) => void = () => {};
   onLocalStun: (strength: number, duration: number) => void = () => {};
+  /** The viewer damaged someone: the HUD floats the number off the wound. */
+  onLocalDamage: (victimId: number, amount: number, point: Vector3, head: boolean, armor: boolean) => void = () => {};
+  /** A round passed close to the viewer's head (0..1 = how close). */
+  onLocalNearMiss: (close: number) => void = () => {};
   freeCam: { pos: Vector3; yaw: number; pitch: number } | null = null;
+  private throwPreview = new ThrowPreview();
+  /** Rate limits (performance.now ms) for the busiest positional sounds. */
+  private whizAt = 0;
+  private impactAt = 0;
+  private casingAt = 0;
+  private roomT = 0;
+  private adsWas = false;
 
   /** Zombies mode: no killcam recording, zombie models and sounds. */
   private readonly zombies: boolean;
@@ -116,9 +139,82 @@ export class MatchView {
     this.bomb = bombModel();
     this.bomb.visible = false;
     this.bombLed = this.bomb.getObjectByName('led') as Mesh | null;
-    this.root.add(this.bomb);
+    this.root.add(this.bomb, this.throwPreview.group);
     for (const a of match.agents) this.addChar(a);
+    // effects that touch the floor, and sound that knows about walls
+    const col = match.world.collision;
+    r.effects.groundAt = (x, z, y) => col.groundHeight(x, z, y);
+    r.effects.onCasingBounce = (pos, kind) => {
+      const t = performance.now();
+      if (t < this.casingAt || pos.distanceToSquared(r.camera.position) > 144) return;
+      this.casingAt = t + 45;
+      sfx.casing(pos.clone(), kind === 'shell');
+    };
+    sfx.occlusion = (pos) => this.occlusionAt(pos);
     this.wireEvents();
+  }
+
+  private occA = new Vector3(); private occB = new Vector3(); private occSide = new Vector3();
+  /**
+   * How much of the way from the listener to a sound is walled off (0 open … 0.85 solid). Besides
+   * the straight line it tries either side of the source and above it, so a sound just round a
+   * corner or through a doorway is only partly muffled.
+   */
+  private occlusionAt(pos: Vector3): number {
+    const cam = this.r.camera.position, col = this.match.world.collision;
+    const src = this.occA.copy(pos);
+    if (src.y < cam.y - 0.7) src.y += 0.7; // footsteps and floor impacts: listen at body height, not through the furniture
+    const dx = src.x - cam.x, dz = src.z - cam.z, flat = Math.hypot(dx, dz);
+    if (flat < 1.5 && Math.abs(src.y - cam.y) < 2) return 0;
+    const side = this.occSide.set(-dz, 0, dx).multiplyScalar(flat > 1e-3 ? 0.9 / flat : 0);
+    let blocked = 0;
+    if (col.segmentBlocked(cam, src)) blocked++;
+    if (col.segmentBlocked(cam, this.occB.copy(src).add(side))) blocked++;
+    if (col.segmentBlocked(cam, this.occB.copy(src).sub(side))) blocked++;
+    if (col.segmentBlocked(cam, this.occB.copy(src).setY(src.y + 0.9))) blocked++;
+    return blocked * 0.2125;
+  }
+
+  /** Throw a spent case out of a gun that just fired. */
+  private ejectCasing(a: Agent, def: WeaponDef, local: boolean, origin: Vector3, end: Vector3) {
+    const ej = ejection(def);
+    if (!ej) return;
+    const cam = this.r.camera, fx = this.r.effects;
+    const hand = local && this.settings().leftHanded ? -1 : 1;
+    const right = new Vector3(Math.cos(a.yaw) * hand, 0, -Math.sin(a.yaw) * hand);
+    const fwd = end.clone().sub(origin).normalize();
+    // Your own brass leaves the port below the edge of the screen (the view model shows it up close)
+    // and lands beside you; everyone else's is thrown from their gun.
+    const pos = local ? cam.position.clone().addScaledVector(right, 0.42).addScaledVector(fwd, 0.25).setY(cam.position.y - 0.38)
+      : origin.clone().addScaledVector(fwd, -0.3).addScaledVector(right, 0.05);
+    if (!local && pos.distanceToSquared(cam.position) > 900) return;
+    const vel = right.multiplyScalar(1.3 + Math.random() * 0.9).addScaledVector(fwd, -0.2 - Math.random() * 0.5)
+      .add(new Vector3(a.vel.x, 1.2 + Math.random() * 0.8, a.vel.z));
+    fx.casing(pos, vel, ej.kind, ej.delay);
+  }
+
+  /** A shot by someone else: does it pass close enough to the viewer's head to hear it go by? */
+  private nearMiss(origin: Vector3, end: Vector3) {
+    const view = this.viewAgent;
+    if (!view || !view.alive || this.freeCam || view.operating !== null || this.killcam) return;
+    const now = performance.now();
+    if (now < this.whizAt) return;
+    const cam = this.r.camera.position;
+    const d = end.clone().sub(origin), len = d.length();
+    if (len < 5) return;
+    d.divideScalar(len);
+    const along = clamp(cam.clone().sub(origin).dot(d), 0, len);
+    // it has to have flown a few metres to get here, and to carry on past (a round that stops at you is a hit or an impact)
+    if (along < 4 || len - along < 0.7) return;
+    const closest = origin.clone().addScaledVector(d, along);
+    const miss = closest.distanceTo(cam);
+    if (miss > 2.2) return;
+    this.whizAt = now + 70;
+    const close = 1 - miss / 2.2;
+    sfx.whiz(closest, 0.35 + 0.65 * close);
+    this.onLocalNearMiss(close);
+    // a faint flinch of the view (camera only: the aim and the crosshair stay put)
+    this.shake = Math.max(this.shake, 0.03 + 0.06 * close);
   }
 
   private addChar(a: Agent) {
@@ -155,12 +251,19 @@ export class MatchView {
     on('shot', (e) => {
       const ent = this.chars.get(e.agentId);
       if (ent) ent.firing = 1;
+      const shooter = this.match.getAgent(e.agentId);
+      const gun = shooter?.activeWeapon() ?? null;
+      // the held gun's own def carries its attachments; fall back to the stock one (never trust it exists)
+      const def: WeaponDef | undefined = gun && gun.def.id === e.weaponId ? gun.def : WEAPONS[e.weaponId];
       if (isView(e.agentId)) {
         if (!e.pellet) {
-          const a = this.viewAgent!;
-          this.r.viewModel.onFire(a.activeWeapon()?.def.recoil.kick ?? 1);
-          sfx.gunshot(e.sound, null);
+          this.r.viewModel.onFire(def?.recoil.kick ?? 1);
+          // the last quarter of a magazine rings hollow, so you hear it running dry
+          const quarter = def ? Math.ceil(def.mag * 0.25) : 0;
+          const emptying = gun && def && def.mag >= 6 && gun.mag < quarter ? 1 - gun.mag / quarter : 0;
+          sfx.gunshot(e.sound, null, 0, emptying);
           fx.muzzle(this.r.camera.position);
+          if (shooter && def) this.ejectCasing(shooter, def, true, e.origin, e.end);
         }
         if (e.tracer) {
           const start = this.r.viewModel.muzzleCamSpace(new Vector3());
@@ -170,12 +273,20 @@ export class MatchView {
       } else {
         if (!e.pellet) {
           sfx.gunshot(e.sound, e.origin, e.origin.distanceTo(listenerPos()));
-          fx.muzzle(e.origin);
+          // everyone else's muzzle flash is drawn in the world (a suppressor or flash hider all but hides it)
+          const quiet = e.sound === 'suppressed' || def?.mods?.smallFlash;
+          fx.muzzle(e.origin, def?.projectile ? undefined : e.end.clone().sub(e.origin).normalize(), quiet ? 0.3 : def?.class === 'pistol' || def?.class === 'smg' ? 0.75 : 1);
+          if (shooter && def) this.ejectCasing(shooter, def, false, e.origin, e.end);
         }
         if (e.tracer) fx.tracer(e.origin, e.end);
+        if (!def?.projectile) this.nearMiss(e.origin, e.end);
       }
     });
-    on('impact', (e) => fx.impact(e.point, e.normal, e.surface));
+    on('impact', (e) => {
+      fx.impact(e.point, e.normal, e.surface);
+      const t = performance.now();
+      if (t >= this.impactAt && e.point.distanceToSquared(listenerPos()) < 324) { this.impactAt = t + 40; sfx.impact(e.point, e.surface); }
+    });
     on('hit', (e) => {
       const dir = e.point.clone().sub(this.match.getAgent(e.attackerId)?.eyePos(new Vector3()) ?? e.point).normalize();
       if (e.source !== 'fire' && e.source !== 'fall') fx.blood(e.point, dir, e.group === 'head');
@@ -183,6 +294,7 @@ export class MatchView {
         const v = this.match.getAgent(e.victimId);
         sfx.hitConfirm(e.group === 'head', !!v && v.helmet && e.group === 'head');
         this.onLocalHit(e.group === 'head');
+        if (e.amount > 0) this.onLocalDamage(e.victimId, e.amount, e.point, e.group === 'head', e.armorDamage > 0);
       }
       if (isView(e.victimId)) {
         sfx.hurt();
@@ -211,8 +323,13 @@ export class MatchView {
       if (isView(e.agentId)) sfx.footstep(e.surface, null, 0.45);
       else sfx.footstep(e.surface, e.pos.clone().setY(e.pos.y + 0.1));
     });
-    on('land', (e) => { if (isView(e.agentId)) { this.landing.kick(e.hard ? 2 : 1); this.r.viewModel.onLand(e.hard); sfx.land(null); } else sfx.land(e.pos); });
-    on('slide', (e) => sfx.slide(isView(e.agentId) ? null : e.pos));
+    on('land', (e) => {
+      if (isView(e.agentId)) { this.landing.kick(e.hard ? 2 : 1); this.r.viewModel.onLand(e.hard); sfx.land(null); } else sfx.land(e.pos);
+      if (e.hard) fx.footDust(e.pos.clone().setY(e.pos.y + 0.05), 1.4);
+    });
+    on('slide', (e) => { sfx.slide(isView(e.agentId) ? null : e.pos); fx.footDust(e.pos.clone().setY(e.pos.y + 0.05)); });
+    on('jump', (e) => { if (isView(e.agentId)) sfx.jump(null); });
+    on('scope', (e) => { if (isView(e.agentId)) sfx.scopeClick(e.level); });
     on('prone', (e) => sfx.prone(isView(e.agentId) ? null : e.pos, e.down));
     on('reload', (e) => {
       const a = this.match.getAgent(e.agentId);
@@ -390,7 +507,11 @@ export class MatchView {
           if (!ev.pellet) { vm.onFire(ev.kick); sfx.gunshot(ev.sound, null); fx.muzzle(this.r.camera.position); }
           if (ev.tracer) { const s = vm.muzzleCamSpace(new Vector3()); this.r.camera.localToWorld(s); fx.tracer(s, end); }
         } else {
-          if (!ev.pellet) { sfx.gunshot(ev.sound, origin, origin.distanceTo(this.r.camera.position)); fx.muzzle(origin); }
+          if (!ev.pellet) {
+            sfx.gunshot(ev.sound, origin, origin.distanceTo(this.r.camera.position));
+            const flight = end.clone().sub(origin);
+            fx.muzzle(origin, flight.lengthSq() > 9 ? flight.normalize() : undefined, ev.sound === 'suppressed' ? 0.3 : 1);
+          }
           if (ev.tracer) fx.tracer(origin, end);
         }
         break;
@@ -768,6 +889,22 @@ export class MatchView {
     if (kc) { this.aimNdc.set(0, 0); this.frameKillcam(dt, kc, lookDelta); }
     else this.updateCamera(dt, look, lookDelta);
     this.syncPaperDoll(dt, look, firstPerson && !kc);
+    // grenade arc for the local player while a throw is held ready
+    this.throwPreview.update(m, firstPerson && !kc && view === m.player ? view : null, this.settings().grenadePreview ?? true, this.r.camera.position, dt, look);
+    if (!kc) {
+      // dust trailing off anyone sliding
+      for (const a of m.agents) if (a.alive && a.sliding && Math.random() < dt * 24) this.r.effects.footDust(_dust.set(a.pos.x, a.pos.y + 0.05, a.pos.z), 0.4);
+      // the gun coming up to the eye and going back down
+      const aiming = firstPerson && !!view && view.wpn.ads;
+      if (aiming !== this.adsWas) { this.adsWas = aiming; if (firstPerson) sfx.aim(aiming); }
+    }
+    // room tone: a tall factory hall rings, an office is tighter, the yard is nearly dry
+    this.roomT -= dt;
+    if (this.roomT <= 0) {
+      this.roomT = 0.4;
+      const cp = this.r.camera.position, floor = m.world.floorAt(cp.x, cp.z);
+      sfx.setRoom(!floor || floor.ceiling === null || cp.y > floor.ceiling ? 0.12 : clamp(0.4 + floor.ceiling / 12, 0.5, 1));
+    }
     this.pings = this.pings.filter((p) => p.until > now);
     this.r.effects.update(dt, this.r.camera, this.r.height, this.r.camera.fov, kc ? kc.time : now);
     const fwd = this.r.camera.getWorldDirection(new Vector3());
@@ -977,6 +1114,12 @@ export class MatchView {
         wantPitch = Math.atan2(k.y - from.y, Math.max(0.5, Math.hypot(k.x - from.x, k.z - from.z)));
         from.x -= Math.sin(wantYaw) * -ease * 0.8; from.z -= Math.cos(wantYaw) * -ease * 0.8;
       }
+      // The drift must not carry the camera through a wall or ceiling next to where you fell.
+      const body = new Vector3(a.pos.x, a.pos.y + 1.0, a.pos.z), drift = from.clone().sub(body), far = drift.length();
+      if (far > 0.01) {
+        const wall = this.match.world.collision.raycast(body, drift.divideScalar(far), far + 0.3);
+        if (wall) from.copy(body).addScaledVector(drift, Math.max(0, wall.t - 0.3));
+      }
       if (this.deathCamYaw === null) { this.deathCamYaw = a.yaw; this.deathCamPitch = a.pitch; }
       const k2 = 1 - Math.exp(-dt * 4);
       this.deathCamYaw += Math.atan2(Math.sin(wantYaw - this.deathCamYaw), Math.cos(wantYaw - this.deathCamYaw)) * k2;
@@ -1054,6 +1197,7 @@ export class MatchView {
       lateralSpeed: a.vel.x * Math.cos(yaw) - a.vel.z * Math.sin(yaw), verticalSpeed: a.vel.y,
       forwardSpeed: -a.vel.x * Math.sin(yaw) - a.vel.z * Math.cos(yaw),
       mantle, stun, busy: a.wpn.ads || reloadP > 0 || now - a.wpn.lastShot < 0.3 || drawP < 1,
+      mag: w && w.def.class !== 'knife' ? w.mag : undefined,
     });
     this.r.showViewModel = a.alive;
   }
@@ -1097,9 +1241,14 @@ export class MatchView {
     this.beamMats.red.dispose(); this.beamMats.green.dispose();
     if (this.ghost) releaseModel(this.ghost);
     releaseModel(this.bomb);
+    this.throwPreview.dispose();
     this.recorder.clear();
     this.killcam = null;
     this.r.scene.remove(this.root);
+    this.r.effects.groundAt = null;
+    this.r.effects.onCasingBounce = () => {};
+    sfx.occlusion = null;
+    sfx.setRoom(1);
     this.r.effects.clear();
     this.r.paperDoll.reset();
   }

@@ -167,8 +167,8 @@ export class OrdnanceManager {
         // stick into walls / floors / props
         this.dropKnife(s.pos.clone().addScaledVector(d, 0.06), d, true);
       }
+      // (no 'knife' event: that is a swing in the thrower's hands, and they let go of this one long ago)
       ctx.events.emit('impact', { point: s.pos.clone(), normal: normal ?? d.clone().negate(), surface: 'metal' });
-      ctx.events.emit('knife', { agentId: s.ownerId, hit: !!agent, stab: false });
       return true;
     }
     if (s.kind === 'stim') {

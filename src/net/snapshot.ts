@@ -61,7 +61,7 @@ export function captureSnapshot(m: Match, full = false): MatchSnapshot {
     ordnance: encode(pick(m.ordnance, ['shots', 'knives'])),
     colliders: encode(m.world.collision.dynamic),
     ...(m instanceof ZombiesMatch ? { zombies: encode({
-      state: pick(m, ['power', 'wave', 'wavePhase', 'waveKindNow', 'phaseUntil', 'waveTotal', 'spawned', 'killedThisWave', 'powerUps', 'timers', 'gas', 'acid', 'spits', 'exfil', 'gameOver', 'won', 'totalKills', 'zoneOpen']),
+      state: pick(m, ['power', 'wave', 'wavesCleared', 'wavePhase', 'waveKindNow', 'phaseUntil', 'waveTotal', 'spawned', 'killedThisWave', 'powerUps', 'timers', 'gas', 'acid', 'spits', 'exfil', 'gameOver', 'won', 'totalKills', 'zoneOpen']),
       gates: m.gates.map(g => ({ open: g.open, openedAt: g.openedAt })), box: m.box, forge: m.forge, perkMachines: m.perkMachines,
     }) } : {}),
   };

@@ -280,7 +280,7 @@ export class LobbyService {
     }
     if (v.type === 'armory') {
       const m = c.room?.match, a = c.agentId === null ? null : m?.getAgent(c.agentId);
-      if (!(m instanceof ZombiesMatch) || !a || typeof v.item !== 'string' || !Object.hasOwn(ARMORY, v.item) || m.interactionFor(a)?.kind !== 'armory' || !m.buyArmory(a, v.item as keyof typeof ARMORY)) this.fail(c, 'Armory purchase unavailable. Stand at the Armory with enough points.');
+      if (!(m instanceof ZombiesMatch) || !a || typeof v.item !== 'string' || !Object.hasOwn(ARMORY, v.item) || !m.nearArmory(a) || !m.buyArmory(a, v.item as keyof typeof ARMORY)) this.fail(c, 'Armory purchase unavailable. Stand at the Armory with enough points.');
       return;
     }
     if (v.type === 'buy' || v.type === 'autoBuy' || v.type === 'rebuy') {

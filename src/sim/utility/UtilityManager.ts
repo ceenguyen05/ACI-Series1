@@ -31,20 +31,49 @@ export class UtilityManager {
 
   clear() { this.projectiles = []; this.smokes = []; this.fires = []; this.decoys = []; this.pulses = []; }
 
-  throwGrenade(a: Agent, kind: UtilityId, strength: number) {
-    const ctx = this.ctx;
-    const pitchDeg = a.pitch / DEG;
+  /**
+   * Where a grenade leaves the hand and how fast, for a throw of `strength` (1 overhand, 0.72
+   * medium, 0.45 underhand). The throw and its on-screen preview share this.
+   */
+  launch(a: Agent, strength: number, yaw = a.yaw, pitch = a.pitch): { pos: Vector3; vel: Vector3 } {
+    const pitchDeg = pitch / DEG;
     const adj = clamp(pitchDeg + 10 * (1 - Math.abs(pitchDeg) / 90), -89, 89) * DEG;
-    const dir = dirFromAngles(a.yaw, adj, new Vector3());
+    const dir = dirFromAngles(yaw, adj, new Vector3());
     const speed = TUNE.underhandSpeed + (TUNE.throwSpeed - TUNE.underhandSpeed) * clamp((strength - 0.45) / 0.55, 0, 1);
     const eye = a.eyePos(new Vector3());
     if (strength < 0.5) eye.y -= 0.6;
-    const start = eye.clone().addScaledVector(dir, 0.35);
-    if (ctx.world.collision.segmentBlocked(eye, start)) start.copy(eye);
-    const vel = dir.multiplyScalar(speed).addScaledVector(a.vel, 0.9);
-    this.projectiles.push({ id: NEXT++, kind, ownerId: a.id, team: a.team, pos: start, vel, thrownAt: ctx.time, restSince: -1, spin: ctx.rng.range(-8, 8) });
+    const pos = eye.clone().addScaledVector(dir, 0.35);
+    if (this.ctx.world.collision.segmentBlocked(eye, pos)) pos.copy(eye);
+    return { pos, vel: dir.multiplyScalar(speed).addScaledVector(a.vel, 0.9) };
+  }
+
+  throwGrenade(a: Agent, kind: UtilityId, strength: number) {
+    const ctx = this.ctx;
+    const { pos, vel } = this.launch(a, strength);
+    this.projectiles.push({ id: NEXT++, kind, ownerId: a.id, team: a.team, pos, vel, thrownAt: ctx.time, restSince: -1, spin: ctx.rng.range(-8, 8) });
     ctx.events.emit('throw', { agentId: a.id, kind });
     ctx.noise(a.pos, 6, a, 'reload');
+  }
+
+  /**
+   * The flight a grenade thrown right now would take, up to where it goes off: the same
+   * integration the real throw runs, one point per tick. `bounces` are the points where it
+   * strikes a surface. `look` aims it somewhere other than the agent's last simulated view (the
+   * renderer passes the live mouse look). Nothing in the match changes.
+   */
+  predict(a: Agent, kind: UtilityId, strength: number, dt: number, look?: { yaw: number; pitch: number }, maxTime = 6): { path: Vector3[]; bounces: Vector3[]; end: Vector3 } {
+    const def = UTILITIES[kind];
+    const p = { ...this.launch(a, strength, look?.yaw, look?.pitch) };
+    const path = [p.pos.clone()], bounces: Vector3[] = [];
+    let rest = -1;
+    // (the real grenade is first integrated on the tick it is thrown, at age 0)
+    for (let age = 0; age <= maxTime + 1e-9; age += dt) {
+      const floor = this.integrate(p, dt, (at) => bounces.push(at.clone()));
+      path.push(p.pos.clone());
+      if (p.vel.length() < 0.25) { if (rest < 0) rest = age; } else rest = -1;
+      if (kind === 'fire' ? floor || age >= (def.fuse ?? 2) : def.fuse !== null ? age >= def.fuse : rest >= 0 && age - rest > 0.25) break;
+    }
+    return { path, bounces, end: p.pos.clone() };
   }
 
   update(dt: number) {
@@ -54,7 +83,7 @@ export class UtilityManager {
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
       const def = UTILITIES[p.kind];
-      const landedOnFloor = this.integrate(p, dt);
+      const landedOnFloor = this.integrate(p, dt, (at) => ctx.events.emit('bounce', { pos: at.clone(), kind: p.kind }));
       const age = now - p.thrownAt;
       const speed = p.vel.length();
       if (speed < 0.25) { if (p.restSince < 0) p.restSince = now; } else p.restSince = -1;
@@ -105,8 +134,11 @@ export class UtilityManager {
     }
   }
 
-  /** Bouncy point-mass integration. Returns true if it struck a floor-like surface this tick. */
-  private integrate(p: Projectile, dt: number): boolean {
+  /**
+   * Bouncy point-mass integration. Returns true if it struck a floor-like surface this tick;
+   * `onBounce` hears about every hard strike.
+   */
+  private integrate(p: { pos: Vector3; vel: Vector3 }, dt: number, onBounce: (at: Vector3) => void): boolean {
     const col = this.ctx.world.collision;
     let hitFloor = false;
     const sub = 4, h = dt / sub;
@@ -129,7 +161,7 @@ export class UtilityManager {
           hitFloor = true;
           if (Math.abs(p.vel.y) < 1.2) p.vel.y = 0;
         }
-        if (impact > 1.5) this.ctx.events.emit('bounce', { pos: p.pos.clone(), kind: p.kind });
+        if (impact > 1.5) onBounce(p.pos);
       } else {
         p.pos.addScaledVector(p.vel, h);
       }

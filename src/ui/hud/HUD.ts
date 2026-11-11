@@ -22,6 +22,19 @@ import { inRect, rectCenter } from '../../core/math';
 
 const REASON_TEXT = { elimination: 'All enemies eliminated', bomb: 'The bomb exploded', defuse: 'The bomb was defused', time: 'Time ran out' } as const;
 
+/**
+ * Live grenades the HUD warns about, and from how far (m). Blinding ones affect your own team, so
+ * they are flagged even when a teammate threw them.
+ */
+const NADE_WARN: Partial<Record<UtilityId, { r: number; blind: boolean }>> = {
+  frag: { r: UTILITY_TUNING.fragRadius + 0.5, blind: false },
+  fire: { r: UTILITY_TUNING.fireRadius + 2, blind: false },
+  flash: { r: 12, blind: true },
+  stun: { r: UTILITY_TUNING.stunRadius + 1, blind: true },
+};
+/** Radius (CSS px) of the ring around the crosshair the grenade warnings sit on. */
+const NADE_RING = 118;
+
 function weaponLabel(src: string): string {
   if (src in WEAPONS) return WEAPONS[src as WeaponId].name;
   if (src in UTILITIES) return UTILITIES[src as UtilityId].name;
@@ -59,6 +72,17 @@ export class HUD {
   private pingLayer: HTMLElement;
   private stunOv: HTMLElement; private lowHpOv: HTMLElement;
   private lightOv: HTMLElement; private glareOv: HTMLElement;
+  /** Floating damage numbers: one per victim, totting up while you keep hitting them. */
+  private dmgLayer: HTMLElement;
+  private dmgNums: { victimId: number; total: number; head: boolean; pos: Vector3; born: number; el: HTMLElement; num: HTMLElement; side: number }[] = [];
+  private dmgTmp = new Vector3();
+  /** Live grenade warnings on a ring around the crosshair. */
+  private nadeLayer: HTMLElement; private nadeEls: HTMLElement[] = [];
+  private nadeTmp = new Vector3(); private nadeEye = new Vector3();
+  /** RELOAD / LOW AMMO / NO AMMO under the crosshair. */
+  private ammoPrompt: HTMLElement;
+  /** Edge darkening when rounds crack past your head. */
+  private suppressOv: HTMLElement; private suppressT = 0;
   private moment: HTMLElement; private momentUntil = 0;
   private clutchRound = -1; private lowHpBeat = 0;
   /** Set by the session so the HUD can show the killcam, pings and the heartbeat screen. */
@@ -95,8 +119,10 @@ export class HUD {
       this.flashOv = h('div', { class: 'flash-overlay' }),
       this.smokeOv = h('div', { class: 'smoke-overlay' }),
       this.hurtOv = h('div', { class: 'hurt-overlay' }),
+      this.suppressOv = h('div', { class: 'suppress-overlay' }),
       this.sights.el,
       this.names = h('div'),
+      this.dmgLayer = h('div', { class: 'dmg-layer' }),
       this.radar.el,
       this.location = h('div', { class: 'location' }),
       h('div', { class: 'hud-money' }, this.moneyEl, this.moneyDelta),
@@ -113,8 +139,10 @@ export class HUD {
       this.banner = h('div', { class: 'round-banner hidden' }),
       this.progress = h('div', { class: 'progress hidden' }, this.progLabel, h('div', { class: 'bar' }, this.progBar)),
       this.hint = h('div', { class: 'hint hidden' }),
+      this.ammoPrompt = h('div', { class: 'ammo-prompt' }),
       this.hitmarker = h('div', { class: 'hitmarker' }),
       this.dmgInd = h('div', { class: 'dmg-ind' }, h('i')),
+      this.nadeLayer = h('div', { class: 'nade-layer' }),
       this.camOv = h('div', { class: 'cam-overlay hidden' },
         h('div', { class: 'tint' }), h('div', { class: 'scan' }), h('div', { class: 'noise' }), h('div', { class: 'vig' }),
         h('div', { class: 'cam-reticle' }),
@@ -293,6 +321,87 @@ export class HUD {
     this.deathUntil = performance.now() + 6000;
   }
   onHurt(relYaw: number) { this.dmgT = 1; this.hurtT = 0.6; this.dmgInd.style.transform = `rotate(${-relYaw}rad)`; }
+
+  /**
+   * You damaged someone: float the number off the wound. Hits on the same target within a moment
+   * add up on one number (a burst reads as its total), gold for the head, pale blue into armor.
+   */
+  onDamage(victimId: number, amount: number, point: Vector3, head: boolean, armor: boolean) {
+    if (!(this.getSettings().damageNumbers ?? true)) return;
+    const now = performance.now();
+    let d = this.dmgNums.find((x) => x.victimId === victimId && now - x.born < 900);
+    if (d) { d.total += amount; d.head ||= head; d.pos.copy(point); d.born = now; }
+    else {
+      const num = h('b');
+      const el = h('div', { class: 'dmgnum' }, num);
+      this.dmgLayer.append(el);
+      d = { victimId, total: amount, head, pos: point.clone(), born: now, el, num, side: Math.random() < 0.5 ? -1 : 1 };
+      this.dmgNums.push(d);
+      while (this.dmgNums.length > 8) this.dmgNums.shift()!.el.remove();
+    }
+    setText(d.num, String(Math.round(d.total)));
+    d.el.classList.toggle('head', d.head);
+    d.el.classList.toggle('armor', armor && !d.head);
+    d.num.animate?.([{ transform: 'scale(1.45)' }, { transform: 'scale(1)' }], { duration: 170, easing: 'cubic-bezier(.2,1.4,.4,1)' });
+  }
+
+  /** A round cracked past your head (0..1 = how close): the edges of the screen tighten for a moment. */
+  onNearMiss(close: number) { this.suppressT = Math.min(0.8, Math.max(this.suppressT, 0.25 + 0.45 * close)); }
+
+  private drawDamageNumbers(camera: PerspectiveCamera, nowMs: number) {
+    const W = window.innerWidth, H = window.innerHeight, replay = !!this.view?.killcam;
+    for (let i = this.dmgNums.length - 1; i >= 0; i--) {
+      const d = this.dmgNums[i], age = (nowMs - d.born) / 1000;
+      if (age > 1.15 || replay) { d.el.remove(); this.dmgNums.splice(i, 1); continue; }
+      const p = this.dmgTmp.copy(d.pos).project(camera);
+      if (p.z > 1) { d.el.style.opacity = '0'; continue; }
+      // drift up and out to one side, so a stream of hits doesn't stack on the crosshair
+      const x = (p.x * 0.5 + 0.5) * W + d.side * (16 + age * 18), y = (-p.y * 0.5 + 0.5) * H - 16 - age * 38;
+      d.el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+      d.el.style.opacity = String(Math.min(1, (1.15 - age) / 0.4));
+      const v = this.match.getAgent(d.victimId);
+      d.el.classList.toggle('kill', !!v && !v.alive);
+    }
+  }
+
+  /**
+   * CoD-style grenade warning: a pulsing badge on a ring around the crosshair, pointing at each live
+   * grenade close enough to hurt or blind you, with its distance. Your own grenade only counts once
+   * it has left your hand, a teammate's frag only with friendly fire on, and anything walled off
+   * from you is left out.
+   */
+  private drawGrenadeWarnings(a: Agent | null, yaw: number) {
+    const m = this.match, list: { ang: number; dist: number; kind: UtilityId; blind: boolean }[] = [];
+    if (a && a.alive && a.operating === null && !this.view?.killcam && (this.getSettings().grenadeWarnings ?? true)) {
+      const center = a.centerPos(this.nadeTmp), eye = a.eyePos(this.nadeEye), col = m.world.collision;
+      for (const p of m.utility.projectiles) {
+        const w = NADE_WARN[p.kind];
+        if (!w) continue;
+        const mine = p.ownerId === a.id;
+        if (mine && m.time - p.thrownAt < 0.6) continue;
+        if (!mine && p.team === a.team && !w.blind && !m.rules.friendlyFire) continue;
+        const dist = p.pos.distanceTo(center);
+        if (dist > w.r) continue;
+        if (col.segmentBlocked(p.pos, center) && col.segmentBlocked(p.pos, eye)) continue;
+        list.push({ ang: Math.atan2(-(p.pos.x - a.pos.x), -(p.pos.z - a.pos.z)) - yaw, dist, kind: p.kind, blind: w.blind });
+      }
+    }
+    while (this.nadeEls.length < list.length) {
+      const el = h('div', { class: 'nade-warn' }, h('i'), h('span'));
+      this.nadeLayer.append(el); this.nadeEls.push(el);
+    }
+    this.nadeEls.forEach((el, i) => {
+      const w = list[i];
+      if (!w) { el.style.display = 'none'; return; }
+      el.style.display = '';
+      if (el.dataset.k !== w.kind) { el.dataset.k = w.kind; (el.firstElementChild as HTMLElement).innerHTML = weaponIcon(w.kind); el.classList.toggle('blind', w.blind); }
+      // CSS rotation runs clockwise: an angle to the left (positive yaw) goes counter-clockwise
+      const t = -w.ang;
+      el.style.transform = `translate(${(Math.sin(t) * NADE_RING).toFixed(1)}px, ${(-Math.cos(t) * NADE_RING).toFixed(1)}px)`;
+      el.classList.toggle('close', w.dist < 4);
+      setText(el.lastElementChild as HTMLElement, `${w.dist.toFixed(w.dist < 10 ? 1 : 0)}m`);
+    });
+  }
   onFlash(strength: number, duration: number) {
     this.flashUntil = performance.now() + duration * 1000; this.flashDur = duration; this.flashStr = strength;
   }
@@ -427,6 +536,17 @@ export class HUD {
       crosshair: s.crosshair, menu: buyOpen,
     });
     this.hitmarker.style.transform = `translate(${this.sights.offset.x}px, ${this.sights.offset.y}px) translate(-50%, -50%) rotate(45deg)`;
+    // reload prompt under the crosshair (your own gun only, not while it is already reloading)
+    let ammo = '', ammoCls = '';
+    if (sighted && a === me && !buyOpen && w && w.def.class !== 'knife' && !(a.wpn.reloadUntil > now) && !a.zp?.downed) {
+      if (w.mag === 0) { ammo = w.reserve > 0 ? `RELOAD · ${keyLabel(s.bindings.reload)}` : 'NO AMMO'; ammoCls = w.reserve > 0 ? 'empty' : 'out'; }
+      else if (w.def.mag >= 5 && w.mag <= Math.max(1, Math.floor(w.def.mag * 0.2)) && w.reserve > 0) { ammo = 'LOW AMMO'; ammoCls = 'low'; }
+    }
+    if (this.ammoPrompt.dataset.k !== ammo) { this.ammoPrompt.dataset.k = ammo; setText(this.ammoPrompt, ammo); this.ammoPrompt.className = `ammo-prompt ${ammoCls}`; }
+    // rounds cracking past
+    this.suppressT = Math.max(0, this.suppressT - dt * 1.8);
+    this.suppressOv.style.opacity = this.suppressT > 0 ? this.suppressT.toFixed(3) : '0';
+    this.drawGrenadeWarnings(a, yaw);
     // weapon light: your own beam brightens the middle of the screen; an enemy beam glares
     this.lightOv.style.opacity = a && a.alive && a.lightOn && a.operating === null && w?.def.mods?.light ? '1' : '0';
     const glare = this.view?.glare;
@@ -442,8 +562,9 @@ export class HUD {
       this.spectate.append(`Spectating ${v.name}`, h('small', null, 'Click to switch player'));
     }
 
-    // teammate name tags
+    // teammate name tags, and the damage you're dealing
     this.updateNames(camera, team);
+    this.drawDamageNumbers(camera, nowMs);
 
     // camera / drone feed overlay
     const feed = a && a.alive ? m.gadgets.get(a.operating) : null;

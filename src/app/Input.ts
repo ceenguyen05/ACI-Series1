@@ -51,10 +51,16 @@ export class Input {
       cb(e.code);
       return;
     }
-    if (this.isTyping(e)) return;
-    if (this.gameFocus && (Object.values(this.bindings).includes(e.code) || e.code.startsWith('Arrow') || e.code === 'Quote' || e.code === 'Slash')) e.preventDefault();
-    if (isDown) { if (!this.down.has(e.code)) this.pressed.add(e.code); this.down.add(e.code); }
-    else this.down.delete(e.code);
+    const typing = this.isTyping(e);
+    if (!typing && this.gameFocus && (Object.values(this.bindings).includes(e.code) || e.code.startsWith('Arrow') || e.code === 'Quote' || e.code === 'Slash')) e.preventDefault();
+    // A key let go is no longer held, wherever focus is: released over a settings slider, it must
+    // not stay "down" when you resume.
+    if (!isDown) { this.down.delete(e.code); return; }
+    if (typing) return;
+    // OS auto-repeat is never a fresh press. After the pointer lock drops (a menu opens) the held
+    // keys are cleared, and a strafe key's next repeat would otherwise press A in the buy menu.
+    if (!e.repeat && !this.down.has(e.code)) this.pressed.add(e.code);
+    this.down.add(e.code);
   }
 
   private onButton(e: MouseEvent, isDown: boolean) {

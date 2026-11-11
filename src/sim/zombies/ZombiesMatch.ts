@@ -141,6 +141,8 @@ export class ZombiesMatch extends Match {
 
   power = false;
   wave = 0;
+  /** Waves fully cleared (the end screen's "survived N waves"; replicated). */
+  wavesCleared = 0;
   wavePhase: 'pre' | 'active' | 'intermission' | 'exfil' | 'over' = 'pre';
   waveKindNow: WaveKind = 'normal';
   phaseUntil = 0;
@@ -262,6 +264,7 @@ export class ZombiesMatch extends Match {
 
     const start = zc.startWave ?? 1;
     this.wave = start - 1;
+    this.wavesCleared = start - 1;
     this.phaseUntil = this.time + (start > 1 ? 2 : T.firstWaveDelay);
     this.computeFlow();
   }
@@ -459,6 +462,7 @@ export class ZombiesMatch extends Match {
     const bonus = POINTS.waveBonus(this.wave);
     for (const h of this.standing()) this.addPoints(h, bonus, 'Wave cleared', false);
     this.events.emit('zWave', { wave: this.wave, kind: this.waveKindNow, state: 'end', count: this.killedThisWave, bonus });
+    this.wavesCleared = this.wave;
     this.wavePhase = 'intermission';
     this.phaseUntil = this.time + T.intermission;
   }
@@ -881,7 +885,11 @@ export class ZombiesMatch extends Match {
 
   private bomberBlast(a: Agent, ownerId: number) {
     const pos = a.pos.clone().setY(a.pos.y + 0.9);
-    if (a.alive) { a.alive = false; a.health = 0; a.deathTime = this.time; a.zombie!.freeAt = this.time + 0.2; a.zombie!.headless = true; this.killedThisWave++; this.totalKills++; }
+    if (a.alive) {
+      a.alive = false; a.health = 0; a.deathTime = this.time; a.zombie!.freeAt = this.time + 0.2; a.zombie!.headless = true; this.killedThisWave++; this.totalKills++;
+      this.lastKillAt = this.time;
+      this.frenzyEndDrop(a.pos.clone());
+    }
     this.pendingBlasts.push({ pos, at: this.time, ownerId });
   }
 
@@ -1144,7 +1152,12 @@ export class ZombiesMatch extends Match {
       if (zs.kind === 'bomber') this.pendingBlasts.push({ pos: v.pos.clone().setY(v.pos.y + 0.9), at: now + 0.15, ownerId: human?.id ?? v.id });
       this.maybeDrop(v.pos, zs.kind === 'tank');
     }
-    if (this.wavePhase === 'active' && this.waveKindNow === 'frenzy' && this.spawned >= this.waveTotal && !this.zombiePool.some((z) => z.alive)) this.dropPowerUp('maxAmmo', v.pos);
+    this.frenzyEndDrop(v.pos);
+  }
+
+  /** The last zombie of a frenzy wave drops a Max Ammo where it fell (shot or self-detonated). */
+  private frenzyEndDrop(pos: Vector3) {
+    if (this.wavePhase === 'active' && this.waveKindNow === 'frenzy' && this.spawned >= this.waveTotal && !this.zombiePool.some((z) => z.alive)) this.dropPowerUp('maxAmmo', pos);
   }
 
   private damageHuman(v: Agent, attacker: Agent | null, dmg: DamageResult, group: HitGroup, source: string, point: Vector3, dir: Vector3) {
@@ -1365,6 +1378,14 @@ export class ZombiesMatch extends Match {
   }
 
   // ======================================================================== interactions
+  /**
+   * Close enough to the Armory to buy from it. Checked directly, not through `interactionFor`:
+   * a downed teammate or an ammo crate nearby takes the Use prompt but must not cancel a purchase.
+   */
+  nearArmory(a: Agent): boolean {
+    return !!a.zp && a.alive && !a.zp.downed && this.facing(a, this.armoryPos.x, this.armoryPos.z, 2.0) >= 0;
+  }
+
   private facing(a: Agent, x: number, z: number, reach: number): number {
     const dx = x - a.pos.x, dz = z - a.pos.z, d = Math.hypot(dx, dz);
     if (d > reach) return -1;
@@ -1383,11 +1404,15 @@ export class ZombiesMatch extends Match {
   interactionFor(a: Agent): Interaction | null {
     const zp = a.zp;
     if (!zp || !a.alive || zp.downed) return null;
-    // revive a downed teammate (hold)
+    // revive a downed teammate (hold): keep on the one you are already reviving, so a second
+    // teammate going down beside you never wipes the progress (and their bleed-out pause)
+    const revive = (h: Agent): Interaction => ({ kind: 'revive', label: h.name, verb: 'revive', price: 0, ok: true, reason: '', hold: true, ref: h.id, progress: h.zp!.revive?.byId === a.id ? h.zp!.revive.progress : 0 });
+    const current = this.humans.find((h) => h !== a && h.alive && h.zp!.downed && h.zp!.revive?.byId === a.id);
+    if (current && this.canRevive(a, current)) return revive(current);
     for (const h of this.humans) {
       if (h === a || !h.alive || !h.zp!.downed) continue;
       if (h.zp!.revive && h.zp!.revive.byId !== a.id) continue;
-      if (this.canRevive(a, h)) return { kind: 'revive', label: h.name, verb: 'revive', price: 0, ok: true, reason: '', hold: true, ref: h.id, progress: h.zp!.revive?.byId === a.id ? h.zp!.revive.progress : 0 };
+      if (this.canRevive(a, h)) return revive(h);
     }
     const cand: { it: Interaction; d: number }[] = [];
     const add = (it: Interaction, d: number) => { if (d >= 0) cand.push({ it, d }); };
@@ -1740,7 +1765,7 @@ export class ZombiesMatch extends Match {
   }
 
   // ======================================================================== debug / tests
-  debugSetWave(w: number) { this.wave = w - 1; this.wavePhase = 'intermission'; this.phaseUntil = this.time; }
+  debugSetWave(w: number) { this.wave = w - 1; this.wavesCleared = w - 1; this.wavePhase = 'intermission'; this.phaseUntil = this.time; }
   debugKillAll() { for (const z of this.zombiePool) if (z.alive) this.killZombie(z, null, 'nuke', 'chest', new Vector3(1, 0, 0), true); }
   /** Remove every zombie and corpse at once (staging for screenshots / tests). */
   debugClear() { for (const z of this.zombiePool) { z.alive = false; z.zombie!.active = false; z.deathTime = -1e9; } this.powerUps = []; this.gas = []; this.acid = []; this.spits = []; }

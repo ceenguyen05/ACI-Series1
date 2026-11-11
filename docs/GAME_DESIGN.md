@@ -185,6 +185,39 @@ line when aiming, and the front post's tip is exactly on it:
     spectate a teammate it shows them;
   * the kill feed moves to its left, and the size slider runs from 70% to 150%.
 
+## Combat feedback (v1.7.7)
+
+* **Grenade trajectory preview** (Settings → Game, on by default).
+  * While you hold a grenade ready (left, right or both mouse buttons), a dotted arc shows the
+    flight it would take right now, with a dot at every bounce and a ring where it goes off.
+    Smokes and firebombs also outline the ground they will cover.
+  * It runs the simulation's own grenade physics, so the grenade goes off exactly at the marker
+    (`tests/game/throw-preview.test.ts`). It follows your live mouse look and only you see it.
+* **Grenade warning** (on by default). A pulsing badge on a ring around the crosshair points at
+  each live frag, firebomb, flashbang or stun grenade close enough to hurt or blind you, with its
+  distance.
+  * Your own grenade counts once it has left your hand.
+  * A teammate's frag or firebomb counts only with friendly fire on; their flashbangs and stuns
+    always do.
+  * Grenades walled off from you are left out.
+* **Damage numbers** (on by default). Each hit you land floats its damage off the wound. Hits on
+  the same target within 0.9 s add up on one number: gold for headshots, pale blue into armor,
+  red once the target is down.
+* **Reload prompt.** RELOAD (with your key) under the crosshair when the magazine is empty, LOW
+  AMMO in its last fifth, NO AMMO when the reserve is gone too. The last quarter of a magazine
+  also rings hollow as you fire, so you hear it running dry.
+* **Near misses.** A round passing within about 2 m of your head cracks past with a hiss,
+  darkens the edges of the screen for a moment and flinches the camera slightly. Your aim and
+  the crosshair do not move.
+* **Sound.**
+  * World sounds are muffled and quieter when walls stand between you and them. The check traces
+    from the camera to the source, to either side of it and above it, so a sound just round a
+    corner or through a doorway is only partly muffled.
+  * Gunfire indoors rings with a short room reverb: longest in the tall factory halls, tighter in
+    offices, nearly dry outside.
+  * Bullets striking metal, glass, wood and fabric each sound different, spent brass tinkles on
+    the floor, and aiming, scoping and jumping have their own foley.
+
 ## Gunsmith (weapon attachments)
 
 Buy-menu tab **4** lets you customise your primary and secondary, like CoD's Gunsmith and
@@ -312,9 +345,12 @@ selected gadget.
 
 **Camera network (T):**
 * Press T to cycle through your team's feeds (your own drones first), Q/E or the mouse wheel to
-  switch feeds, and T again to exit.
-* While you watch a feed, your body stands still in the world. Taking damage kicks you out of
-  the feed (but not out of a cruise missile you're steering).
+  switch feeds, and T again to exit. Feeds can't be opened during freeze time, so the building
+  CCTV never shows Defenders where the Attackers spawned that round.
+* While you watch a feed, your body stands still in the world. Taking damage, including fire,
+  kicks you out of the feed (but not out of a cruise missile you're steering).
+* A drone that lands while you are planting or defusing waits: open its feed with T when your
+  hands are free.
 * Anything visible on a feed you are watching is spotted on your team's radar.
 * Left mouse **pings** every enemy within a 22° cone of the crosshair. They are outlined
   through walls for your team for 4 s.
@@ -327,7 +363,7 @@ selected gadget.
 
 ## Movement (Source-style)
 
-* Ground acceleration and friction (`sv_accelerate 5.5`, `sv_friction 5.2`) and air-strafing
+* Ground acceleration and friction (`sv_accelerate 6.2`, `sv_friction 5.2`) and air-strafing
   (`sv_airaccelerate 12`, 30 u/s wish cap).
 * Max speed depends on the weapon (knife 250 u/s ≈ 6.35 m/s, Longbow 200 u/s).
 * Walking (Shift) moves at 52% speed and makes **no footsteps**. Crouching moves at 34% speed and

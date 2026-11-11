@@ -46,7 +46,8 @@ export class Killstreaks {
   /** Use the oldest earned streak. Returns true if something was launched. */
   activate(a: Agent): boolean {
     const m = this.m;
-    if (!a.alive || !a.streaks.length || (m.phase !== 'live' && m.phase !== 'planted')) return false;
+    // planting or defusing keeps both hands busy (a missile would also pull you off the bomb)
+    if (!a.alive || a.isPlanting || a.isDefusing || !a.streaks.length || (m.phase !== 'live' && m.phase !== 'planted')) return false;
     const id = a.streaks[0];
     const now = m.time;
     const enemy = otherTeam(a.team);

@@ -1,5 +1,5 @@
 import { DEG, clamp, wrapAngle } from '../core/math';
-import { emptyCommand, type Agent, type AgentCommand, type ActiveSlot } from '../sim/entities/Agent';
+import { emptyCommand, type Agent, type AgentCommand, type ActiveSlot, type WeaponInstance } from '../sim/entities/Agent';
 import type { Input } from './Input';
 import type { Settings } from './Profile';
 import type { UtilityId } from '../config/utilities';
@@ -29,6 +29,10 @@ export class PlayerController {
   private proneLatched = false;
   private crouchWasDown = false;
   private standRequest = false;
+  /** Space stood you up from a toggled stance: it doesn't jump until it is let go. */
+  private jumpLocked = false;
+  /** The gun the ADS toggle state belongs to. */
+  private adsGun: WeaponInstance | null = null;
   private pendingFire = false;
   private pendingCycle = false;
   private pendingGadgetCycle = false;
@@ -54,6 +58,7 @@ export class PlayerController {
   syncFrom(agent: Agent) {
     this.yaw = agent.yaw; this.pitch = agent.pitch; this.leanState = 0; this.adsState = false; this.crouchHeldFor = 0; this.pendingSlide = false;
     this.crouchToggled = false; this.proneLatched = false; this.crouchWasDown = false; this.standRequest = false;
+    this.jumpLocked = false; this.adsGun = null;
   }
 
   /** Toggle-crouch mode: is the player currently crouched / prone by toggle? (HUD hint text) */
@@ -68,7 +73,9 @@ export class PlayerController {
     const zs = zoom > 1 ? s.zoomSensitivity / zoom : 1;
     const inp0 = this.input, b = s.bindings;
     const active = dx !== 0 || dy !== 0 || inp0.isDown(b.left) || inp0.isDown(b.right) || inp0.isDown(b.forward) || inp0.isDown(b.back);
-    const as = agent.operating === null && this.assist ? this.assist(this.yaw, this.pitch, dt, active, zoom) : null;
+    // Only while you have control: paused or in a menu, the assist's idle pull would slide the view
+    // onto an enemy (and online, send that drifted aim to the server).
+    const as = agent.operating === null && this.assist && inp0.gameFocus && inp0.locked ? this.assist(this.yaw, this.pitch, dt, active, zoom) : null;
     const k = s.sensitivity * 0.022 * DEG * zs * (as ? as.sens : 1) * this.sensMul;
     this.yaw = wrapAngle(this.yaw - dx * k + (as ? as.yaw : 0));
     this.pitch = clamp(this.pitch - dy * k * (s.invertY ? -1 : 1) + (as ? as.pitch : 0), -89 * DEG, 89 * DEG);
@@ -88,11 +95,11 @@ export class PlayerController {
         }
         this.crouchHeldFor = 0;
       }
-      // Space from prone or a toggled crouch stands you up instead of jumping
+      // Space from prone or a toggled crouch stands you up instead of jumping (and keeps holding it
+      // from hopping the moment you are up)
       if (inp.actionPressed('jump') && (this.proneLatched || this.crouchToggled)) {
-        const fromProne = this.proneLatched;
         this.proneLatched = false; this.crouchToggled = false;
-        if (fromProne) this.standRequest = true;
+        this.standRequest = true; this.jumpLocked = true;
       }
     } else {
       // CS hold-to-crouch: keep holding while still to go prone. Moving, firing or aiming
@@ -135,8 +142,11 @@ export class PlayerController {
       if (inp.actionPressed('leanLeft')) this.leanState = this.leanState === -1 ? 0 : -1;
       if (inp.actionPressed('leanRight')) this.leanState = this.leanState === 1 ? 0 : 1;
     }
-    if (s.adsToggle && inp.wasPressed('Mouse2')) this.adsState = !this.adsState;
-    if (agent.active !== 'primary' && agent.active !== 'secondary') this.adsState = false;
+    // ADS toggle: only an unscoped gun toggles (a scoped rifle steps its zoom on each press instead),
+    // and changing weapons drops the aim, so it never carries over to the next gun.
+    const gun = agent.active === 'primary' || agent.active === 'secondary' ? agent.activeWeapon() : null;
+    if (gun !== this.adsGun) { this.adsGun = gun; this.adsState = false; }
+    if (s.adsToggle && inp.wasPressed('Mouse2') && gun && !gun.def.scope) this.adsState = !this.adsState;
   }
 
   private cycleSlot(a: Agent, dir: number): ActiveSlot | null {
@@ -161,7 +171,8 @@ export class PlayerController {
     const inp = this.input, s = this.settings;
     cmd.forward = (inp.action('forward') ? 1 : 0) - (inp.action('back') ? 1 : 0);
     cmd.right = (inp.action('right') ? 1 : 0) - (inp.action('left') ? 1 : 0);
-    cmd.jump = this.pendingJump || inp.action('jump');
+    if (this.jumpLocked && !inp.action('jump')) this.jumpLocked = false;
+    cmd.jump = !this.jumpLocked && (this.pendingJump || inp.action('jump'));
     if (s.crouchMode === 'toggle') {
       cmd.crouch = this.crouchToggled || this.proneLatched || inp.action('crouch');
       cmd.prone = this.proneLatched;

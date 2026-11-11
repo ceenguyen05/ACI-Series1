@@ -2,6 +2,11 @@ import type { Vector3 } from 'three';
 import type { SoundProfile } from '../config/weapons';
 
 type Pos = Vector3 | null;
+/**
+ * Where a sound layer plays: a world position, null (inside the listener's head), or a node
+ * already built for this sound, so every layer of one sound shares a single panner.
+ */
+type Dest = Pos | AudioNode;
 
 interface GunVoice { body: number; q: number; thump: number; dur: number; gain: number; click: number }
 const GUN: Record<SoundProfile, GunVoice> = {
@@ -32,6 +37,13 @@ export class Sfx {
   private noise!: AudioBuffer;
   private ringOsc: OscillatorNode | null = null;
   private volumes = { master: 0.8, sfx: 1, ui: 0.7 };
+  private reverbSend: GainNode | null = null;
+  private room = 0.2;
+  /**
+   * How much of the path from the listener to a world position is blocked (0 open … 1 fully behind
+   * walls). Set by the match view; occluded sounds are duller and quieter.
+   */
+  occlusion: ((pos: Vector3) => number) | null = null;
 
   /** Must be called from a user gesture. */
   resume() {
@@ -53,9 +65,47 @@ export class Sfx {
       this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
       const d = this.noise.getChannelData(0);
       for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      // Room reverb: world sounds leave a short tail, so gunfire rings indoors instead of stopping dead.
+      try {
+        const reverb = this.ctx.createConvolver();
+        reverb.buffer = this.impulse(1.25);
+        this.reverbSend = this.ctx.createGain();
+        this.reverbSend.gain.value = this.room;
+        this.muffle.connect(this.reverbSend).connect(reverb).connect(this.master);
+      } catch { this.reverbSend = null; /* no convolver: play dry */ }
       this.applyVolumes();
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume();
+  }
+
+  /** A synthetic room response: a few early reflections, then a decaying, darkening noise tail. */
+  private impulse(seconds: number): AudioBuffer {
+    const c = this.ctx!, sr = c.sampleRate, len = Math.floor(sr * seconds);
+    const buf = c.createBuffer(2, len, sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch);
+      let lp = 0;
+      for (let i = 0; i < len; i++) {
+        const t = i / sr;
+        // the tail loses its highs as it decays (air and soft furnishings absorb them first)
+        const k = 0.5 - 0.42 * Math.min(1, t / seconds);
+        lp += ((Math.random() * 2 - 1) - lp) * k;
+        d[i] = lp * Math.exp(-6.9 * t / seconds) * Math.min(1, t / 0.006);
+      }
+      for (const [ms, g] of [[11, 0.5], [19, -0.38], [31, 0.3], [47, -0.22]] as const) {
+        const i = Math.floor((ms + ch * 2.5) * sr / 1000);
+        if (i < len) d[i] += g;
+      }
+    }
+    return buf;
+  }
+
+  /** Reverb amount for where the listener stands: 1 = a hard-walled room, 0 = open air. */
+  setRoom(amount: number) {
+    const v = 0.03 + 0.19 * Math.max(0, Math.min(1, amount));
+    if (Math.abs(v - this.room) < 0.005) return;
+    this.room = v;
+    if (this.ctx && this.reverbSend) this.reverbSend.gain.setTargetAtTime(v, this.ctx.currentTime, 0.35);
   }
 
   setVolumes(master: number, sfx: number, ui: number) { this.volumes = { master, sfx, ui }; this.applyVolumes(); }
@@ -81,18 +131,34 @@ export class Sfx {
   }
 
   // ---------------------------------------------------------------- primitives
-  private out(at: Pos, bus?: GainNode): AudioNode {
+  private out(at: Dest, bus?: GainNode): AudioNode {
     const c = this.ctx!;
     if (!at) return bus ?? this.world;
+    if (!(at as Vector3).isVector3) return at as AudioNode;
+    const pos = at as Vector3;
     const p = c.createPanner();
     p.panningModel = 'HRTF'; p.distanceModel = 'inverse';
     p.refDistance = 2.5; p.rolloffFactor = 1.1; p.maxDistance = 120;
-    p.positionX.value = at.x; p.positionY.value = at.y; p.positionZ.value = at.z;
+    p.positionX.value = pos.x; p.positionY.value = pos.y; p.positionZ.value = pos.z;
     p.connect(bus ?? this.world);
-    return p;
+    // Behind a wall: lose the highs and some level, like a sound heard through a building.
+    const occ = this.occlusion ? Math.max(0, Math.min(1, this.occlusion(pos))) : 0;
+    if (occ < 0.05) return p;
+    const f = c.createBiquadFilter();
+    f.type = 'lowpass'; f.frequency.value = 16000 * Math.pow(0.055, occ); f.Q.value = 0.5;
+    const g = c.createGain();
+    g.gain.value = 1 - 0.32 * occ;
+    f.connect(g).connect(p);
+    return f;
   }
 
-  private noiseHit(o: { at: Pos; dur: number; type: BiquadFilterType; freq: number; freqEnd?: number; q?: number; gain: number; attack?: number; delay?: number; bus?: GainNode }) {
+  /**
+   * One destination for every layer of a sound. A gunshot has five layers; giving each its own
+   * HRTF panner made a firefight cost several times the audio work it needs.
+   */
+  private dest(at: Pos): Dest { return this.ctx && at ? this.out(at) : at; }
+
+  private noiseHit(o: { at: Dest; dur: number; type: BiquadFilterType; freq: number; freqEnd?: number; q?: number; gain: number; attack?: number; delay?: number; bus?: GainNode }) {
     const c = this.ctx; if (!c || !(o.gain > 0.002)) return;
     const t = c.currentTime + (o.delay ?? 0);
     const src = c.createBufferSource();
@@ -110,7 +176,7 @@ export class Sfx {
     src.stop(t + o.dur + 0.05);
   }
 
-  private tone(o: { at: Pos; type: OscillatorType; freq: number; freqEnd?: number; dur: number; gain: number; delay?: number; bus?: GainNode; attack?: number }) {
+  private tone(o: { at: Dest; type: OscillatorType; freq: number; freqEnd?: number; dur: number; gain: number; delay?: number; bus?: GainNode; attack?: number }) {
     const c = this.ctx; if (!c || !(o.gain > 0.002)) return;
     const t = c.currentTime + (o.delay ?? 0);
     const osc = c.createOscillator();
@@ -126,11 +192,16 @@ export class Sfx {
   }
 
   // ---------------------------------------------------------------- weapons
-  gunshot(profile: SoundProfile, at: Pos, distance = 0) {
+  /**
+   * `emptying` (0..1, your own gun only) adds the hollow ring of a magazine running dry over its
+   * last few rounds, so you hear when to reload without looking at the counter.
+   */
+  gunshot(profile: SoundProfile, pos: Pos, distance = 0, emptying = 0) {
     if (!this.ctx) return;
     const v = GUN[profile];
     const far = Math.min(1, distance / 60);
     const lp = 16000 * (1 - far * 0.85);
+    const at = this.dest(pos);
     this.noiseHit({ at, dur: 0.02, type: 'highpass', freq: 2500, gain: 0.5 * v.click * (1 - far), attack: 0.0005 });
     this.noiseHit({ at, dur: v.dur, type: 'bandpass', freq: v.body * (1 - far * 0.4), q: v.q, gain: 1.4 * v.gain, attack: 0.001 });
     this.noiseHit({ at, dur: v.dur * 2.6, type: 'lowpass', freq: Math.min(lp, 2200), freqEnd: 300, gain: 0.35 * v.gain, attack: 0.004 });
@@ -138,11 +209,13 @@ export class Sfx {
     // A short mechanical layer separates the action from the report.
     this.noiseHit({ at, dur: 0.035, type: 'bandpass', freq: 3400, q: 3.5, gain: 0.11 * (1 - far), delay: profile === 'shotgun' ? 0.28 : 0.045 });
     if (profile === 'sniper' || profile === 'shotgun') this.noiseHit({ at, dur: 0.085, type: 'highpass', freq: 1700, gain: 0.15 * (1 - far), delay: 0.36 });
+    if (emptying > 0) this.tone({ at, type: 'triangle', freq: 2300 + 1100 * emptying, freqEnd: 1900 + 900 * emptying, dur: 0.07, gain: 0.05 + 0.09 * emptying, delay: 0.025 });
   }
 
   dryFire() { this.tone({ at: null, type: 'square', freq: 1800, freqEnd: 900, dur: 0.03, gain: 0.15 }); }
 
-  reload(at: Pos, duration = 2.5) {
+  reload(pos: Pos, duration = 2.5) {
+    const at = this.dest(pos);
     this.noiseHit({ at, dur: 0.12, type: 'highpass', freq: 1100, gain: 0.12, delay: duration * 0.08 });
     this.noiseHit({ at, dur: 0.05, type: 'bandpass', freq: 2500, q: 4, gain: 0.3, delay: duration * 0.16 });
     this.noiseHit({ at, dur: 0.06, type: 'bandpass', freq: 1800, q: 3, gain: 0.4, delay: duration * 0.67 });
@@ -151,9 +224,68 @@ export class Sfx {
 
   draw(at: Pos) { this.noiseHit({ at, dur: 0.08, type: 'bandpass', freq: 3000, q: 2, gain: 0.25 }); }
 
-  knife(at: Pos, hit: boolean) {
+  knife(pos: Pos, hit: boolean) {
+    const at = this.dest(pos);
     this.noiseHit({ at, dur: 0.16, type: 'bandpass', freq: 4000, freqEnd: 1500, q: 1.5, gain: 0.25 });
     if (hit) this.noiseHit({ at, dur: 0.08, type: 'lowpass', freq: 900, gain: 0.6, delay: 0.05 });
+  }
+
+  /**
+   * A round passing close to your head: the crack of it going by, then the hiss trailing off.
+   * `close` is 1 for a near graze and falls toward 0 at the edge of earshot.
+   */
+  whiz(pos: Pos, close: number) {
+    const at = this.dest(pos);
+    this.noiseHit({ at, dur: 0.028, type: 'highpass', freq: 3600, gain: 0.55 * close, attack: 0.0005 });
+    this.noiseHit({ at, dur: 0.17, type: 'bandpass', freq: 2600 + Math.random() * 900, freqEnd: 650, q: 2.4, gain: 0.36 * close, delay: 0.01 });
+  }
+
+  /** A bullet striking something near you: each material answers differently. */
+  impact(pos: Pos, surface: string) {
+    const at = this.dest(pos);
+    switch (surface) {
+      case 'metal': case 'vehicle': {
+        const f = 2300 + Math.random() * 1500;
+        this.noiseHit({ at, dur: 0.045, type: 'bandpass', freq: 3200, q: 4, gain: 0.3 });
+        this.tone({ at, type: 'triangle', freq: f, freqEnd: f * 0.78, dur: 0.14, gain: 0.11 }); // ricochet ring
+        break;
+      }
+      case 'glass':
+        this.noiseHit({ at, dur: 0.07, type: 'highpass', freq: 4500, gain: 0.28 });
+        this.tone({ at, type: 'sine', freq: 3600 + Math.random() * 900, dur: 0.05, gain: 0.07 });
+        break;
+      case 'wood':
+        this.noiseHit({ at, dur: 0.07, type: 'lowpass', freq: 900, gain: 0.42 });
+        this.noiseHit({ at, dur: 0.03, type: 'bandpass', freq: 2000, q: 2, gain: 0.15 });
+        break;
+      case 'fabric':
+        this.noiseHit({ at, dur: 0.06, type: 'lowpass', freq: 520, gain: 0.26 });
+        break;
+      default:
+        this.noiseHit({ at, dur: 0.06, type: 'bandpass', freq: 1300 + Math.random() * 500, q: 1, gain: 0.36 });
+        this.noiseHit({ at, dur: 0.03, type: 'highpass', freq: 3000, gain: 0.14 });
+    }
+  }
+
+  /** Spent brass ringing off the floor (a shotgun hull is a dull plastic tap). */
+  casing(pos: Pos, shell = false) {
+    const at = this.dest(pos);
+    if (shell) { this.noiseHit({ at, dur: 0.05, type: 'bandpass', freq: 900, q: 2, gain: 0.16 }); return; }
+    const f = 3900 + Math.random() * 1700;
+    this.tone({ at, type: 'triangle', freq: f, dur: 0.045, gain: 0.05 });
+    this.tone({ at, type: 'triangle', freq: f * 1.19, dur: 0.035, gain: 0.03, delay: 0.075 + Math.random() * 0.04 });
+  }
+
+  /** Cloth and gear shifting as you push off the ground. */
+  jump(at: Pos) { this.noiseHit({ at, dur: 0.1, type: 'bandpass', freq: 650, freqEnd: 900, q: 0.8, gain: at ? 0.2 : 0.11 }); }
+
+  /** Bringing the gun up to your eye, or lowering it again. */
+  aim(up: boolean) { this.noiseHit({ at: null, dur: 0.07, type: 'bandpass', freq: up ? 1500 : 1100, q: 1.2, gain: 0.07 }); }
+
+  /** A scope's zoom ring clicking to its next stop (or back off the eye). */
+  scopeClick(level: number) {
+    this.noiseHit({ at: null, dur: 0.025, type: 'bandpass', freq: level > 0 ? 3000 + level * 500 : 2200, q: 5, gain: 0.16 });
+    if (level > 0) this.noiseHit({ at: null, dur: 0.09, type: 'bandpass', freq: 1300, q: 1, gain: 0.05, delay: 0.02 });
   }
 
   /** Feedback when the local player hits someone (CS-style audible hit). */
@@ -186,8 +318,9 @@ export class Sfx {
       asphalt: ['bandpass', 800, 0.5], asphaltSpawn: ['bandpass', 800, 0.5],
     };
     const [type, freq, gain] = s[surface] ?? ['bandpass', 1000, 0.5];
-    this.noiseHit({ at, dur: 0.07, type, freq: freq * (0.85 + Math.random() * 0.3), q: 1.2, gain: gain * loud });
-    this.noiseHit({ at, dur: 0.05, type: 'lowpass', freq: 250, gain: 0.4 * loud, delay: 0.01 });
+    const d = this.dest(at);
+    this.noiseHit({ at: d, dur: 0.07, type, freq: freq * (0.85 + Math.random() * 0.3), q: 1.2, gain: gain * loud });
+    this.noiseHit({ at: d, dur: 0.05, type: 'lowpass', freq: 250, gain: 0.4 * loud, delay: 0.01 });
   }
 
   land(at: Pos) { this.noiseHit({ at, dur: 0.12, type: 'lowpass', freq: 400, gain: 0.6 }); }
@@ -205,8 +338,9 @@ export class Sfx {
   throwSound(at: Pos) { this.noiseHit({ at, dur: 0.2, type: 'bandpass', freq: 1200, freqEnd: 600, q: 1, gain: 0.3 }); }
   bounce(at: Pos) { this.tone({ at, type: 'triangle', freq: 900 + Math.random() * 400, dur: 0.06, gain: 0.2 }); }
 
-  explosion(at: Pos, big = false) {
+  explosion(pos: Pos, big = false) {
     const k = big ? 1.6 : 1;
+    const at = this.dest(pos);
     this.noiseHit({ at, dur: 1.4 * k, type: 'lowpass', freq: 1800, freqEnd: 120, gain: 1.8, attack: 0.002 });
     this.tone({ at, type: 'sine', freq: 90, freqEnd: 30, dur: 0.8 * k, gain: 1.4 });
     this.noiseHit({ at, dur: 0.06, type: 'highpass', freq: 1500, gain: 0.9 });
@@ -281,9 +415,10 @@ export class Sfx {
   // ---------------------------------------------------------------- bomb / round
   // ---------------------------------------------------------------- arsenal + killstreaks
   /** Blast scaled by radius: rockets / C4 / hunter drones / cruise missiles. */
-  blast(at: Pos, radius: number) {
+  blast(pos: Pos, radius: number) {
     const big = radius >= 7;
-    this.explosion(at, big);
+    const at = this.dest(pos);
+    this.explosion(pos, big);
     this.tone({ at, type: 'sine', freq: 70, freqEnd: 24, dur: 0.9 + radius * 0.05, gain: 0.9 });
     this.noiseHit({ at, dur: 0.6, type: 'highpass', freq: 3000, freqEnd: 800, gain: 0.25, delay: 0.12 }); // debris rattle
   }
@@ -297,7 +432,8 @@ export class Sfx {
     this.tone({ at, type: 'sine', freq: 660, dur: 0.12, gain: 0.12, delay: 0.1 });
     this.tone({ at, type: 'sine', freq: 990, dur: 0.18, gain: 0.1, delay: 0.2 });
   }
-  meleeSwing(at: Pos, hit: boolean) {
+  meleeSwing(pos: Pos, hit: boolean) {
+    const at = this.dest(pos);
     this.noiseHit({ at, dur: 0.18, type: 'bandpass', freq: 2200, freqEnd: 700, q: 1.2, gain: 0.32 });
     if (hit) this.noiseHit({ at, dur: 0.09, type: 'lowpass', freq: 800, gain: 0.7, delay: 0.09 });
   }

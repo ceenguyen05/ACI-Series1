@@ -18,8 +18,41 @@ export function browserArgs(extra = []) {
   return [...gl, '--autoplay-policy=no-user-gesture-required', ...extra];
 }
 
-export function launchBrowser(extra = []) {
-  return chromium.launch({ args: browserArgs(extra) });
+/**
+ * In-page stand-in for the Pointer Lock API, installed in every page the scripts open.
+ *
+ * The game requests pointer lock when a match starts. In the hidden test browser a real lock makes
+ * Chromium call Windows' ClipCursor() with its invisible 1280×720 window at the top-left of the
+ * primary screen, which traps the developer's actual mouse in that box until they switch apps.
+ * The stand-in keeps what the page sees (pointerLockElement, pointerlockchange, a resolved promise)
+ * without the browser ever locking, so the OS cursor is never touched.
+ */
+export function fakePointerLock() {
+  let target = null;
+  const changed = () => setTimeout(() => document.dispatchEvent(new Event('pointerlockchange', { bubbles: true })));
+  Object.defineProperty(Document.prototype, 'pointerLockElement', {
+    configurable: true,
+    get() { return target && target.isConnected && target.ownerDocument === this ? target : null; },
+  });
+  Element.prototype.requestPointerLock = function () {
+    if (target !== this) { target = this; changed(); }
+    return Promise.resolve();
+  };
+  Document.prototype.exitPointerLock = function () {
+    if (target) { target = null; changed(); }
+  };
+}
+
+export async function launchBrowser(extra = []) {
+  const browser = await chromium.launch({ args: browserArgs(extra) });
+  // browser.newPage() goes through newContext(), so this covers every page the scripts open.
+  const newContext = browser.newContext.bind(browser);
+  browser.newContext = async (options) => {
+    const context = await newContext(options);
+    await context.addInitScript(fakePointerLock);
+    return context;
+  };
+  return browser;
 }
 
 /**

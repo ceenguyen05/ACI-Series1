@@ -164,6 +164,34 @@ input, select { font-family: var(--font); }
 .flash-overlay { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
 .smoke-overlay { position: absolute; inset: 0; background: #aeb3b6; opacity: 0; pointer-events: none; }
 .hurt-overlay { position: absolute; inset: 0; pointer-events: none; opacity: 0; box-shadow: inset 0 0 160px rgba(200,0,0,.9); }
+/* Rounds cracking past your head tighten the edges of the view for a moment. */
+.suppress-overlay { position: absolute; inset: 0; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, transparent 52%, rgba(6,8,10,.62) 100%); }
+/* Floating damage numbers (HUD.onDamage): one per target, totting up a burst. */
+.dmg-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.dmgnum { position: absolute; left: 0; top: 0; width: 60px; margin: -10px 0 0 -30px; text-align: center; will-change: transform, opacity; }
+.dmgnum b { display: inline-block; font-size: 17px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px #000, 0 0 6px rgba(0,0,0,.65); }
+.dmgnum.armor b { color: #bfe0ff; }
+.dmgnum.head b { color: #ffcf4a; font-size: 20px; }
+.dmgnum.kill b { color: #ff5b47; }
+/* Live grenade warnings on a ring around the crosshair. */
+.nade-layer { position: absolute; left: 50%; top: 50%; width: 0; height: 0; pointer-events: none; }
+.nade-warn { position: absolute; left: 0; top: 0; width: 56px; margin: -19px 0 0 -28px; display: flex; flex-direction: column; align-items: center; }
+.nade-warn i { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #fff;
+  background: rgba(120,14,4,.6); border: 2px solid #ff5a3c; animation: nadePulse .5s ease-in-out infinite alternate; }
+.nade-warn i svg { width: 46px; height: 15px; flex: none; }
+.nade-warn.blind i { background: rgba(70,74,82,.6); border-color: #f2f4f8; }
+.nade-warn.close i { animation-duration: .22s; }
+.nade-warn span { margin-top: 3px; font-size: 11px; letter-spacing: .04em; color: #ffd6cc; text-shadow: 0 1px 2px #000; }
+.nade-warn.blind span { color: #e8ecf2; }
+@keyframes nadePulse { to { transform: scale(1.14); box-shadow: 0 0 14px rgba(255,90,60,.8); } }
+/* RELOAD / LOW AMMO under the crosshair. */
+.ammo-prompt { position: absolute; left: 50%; top: calc(50% + 46px); transform: translateX(-50%); pointer-events: none; font-size: 13px; font-weight: 700;
+  letter-spacing: .2em; text-shadow: 0 1px 2px #000, 0 0 8px rgba(0,0,0,.6); white-space: nowrap; }
+.ammo-prompt.low { color: var(--accent-2); }
+.ammo-prompt.empty { color: var(--bad); animation: pulse .7s ease-in-out infinite; }
+.ammo-prompt.out { color: #b9bfc6; }
+.hud.killcam-on .ammo-prompt, .hud.killcam-on .nade-layer, .hud.killcam-on .dmg-layer { display: none; }
 /* Sights (ui/hud/Sights.ts): each layer is moved onto the screen point the next shot goes to, so the
    vignettes are oversized to never show an edge. */
 .sights { position: absolute; inset: 0; pointer-events: none; }

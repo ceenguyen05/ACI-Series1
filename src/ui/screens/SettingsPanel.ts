@@ -50,6 +50,11 @@ export class SettingsPanel {
         add('Aim-down-sights mode', seg([{ value: 'hold', label: 'Hold' }, { value: 'toggle', label: 'Toggle' }], s.adsToggle ? 'toggle' : 'hold', (v) => this.set('adsToggle', v === 'toggle')));
         add('Final killcam', toggle(s.killcam ?? true, (v) => this.set('killcam', v)));
         add('Objective markers (sites, bomb)', toggle(s.objectiveMarkers ?? true, (v) => this.set('objectiveMarkers', v)));
+        add('Grenade trajectory preview', toggle(s.grenadePreview ?? true, (v) => this.set('grenadePreview', v)));
+        add('Grenade warning indicator', toggle(s.grenadeWarnings ?? true, (v) => this.set('grenadeWarnings', v)));
+        add('Damage numbers', toggle(s.damageNumbers ?? true, (v) => this.set('damageNumbers', v)));
+        grid.append(h('div'), h('div', { class: 'muted', style: 'font-size:12px;line-height:1.5;margin-top:-6px' },
+          'The preview draws where a grenade you hold ready will fly, bounce and go off. The warning points at live grenades close enough to hurt or blind you. Damage numbers float off whoever you hit (gold for headshots).'));
         add('Gameplay tips', toggle(s.tips ?? true, (v) => this.set('tips', v)));
         add('Rotate radar', toggle(s.rotateRadar, (v) => this.set('rotateRadar', v)));
         add('Radar zoom', slider(0.5, 2, 0.1, s.radarZoom, (v) => this.set('radarZoom', v), (v) => v.toFixed(1) + '×'));

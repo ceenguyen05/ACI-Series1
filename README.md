@@ -55,9 +55,14 @@ or bots.
 - **Gunsmith:** up to 5 attachments per gun (optics, muzzles, grips, lasers, mags, ammo types)
 - Source-style movement: counter-strafing, air-strafing, crouch-jumps, slides, prone,
   mantling and lean
+- Readable fights: glowing tracer streaks, muzzle flashes and spent brass in the world, the crack
+  of near misses, floating damage numbers, and sound that is muffled through walls and rings in
+  big rooms
 
 **Tactics**
 - Frags, flashbangs, smokes, Molotovs and an original Recon Pulse
+- A grenade trajectory preview while you hold a throw, and a warning that points at live grenades
+  near you
 - Siege-style gadgets: drones, sticky cams, trip mines, barbed wire, deployable shields, EMP
   and building CCTV
 - Fortify and breach: board up doorways, pry them open, plant and detonate C4

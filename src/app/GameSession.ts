@@ -122,6 +122,8 @@ export class GameSession {
     this.hud = new HUD(this.match, settings, () => this.view.viewAgent);
     this.view.onLocalHit = (head) => this.hud.onHit(head);
     this.view.onLocalKill = (hs) => this.hud.onKill(hs);
+    this.view.onLocalDamage = (id, amount, point, head, armor) => this.hud.onDamage(id, amount, point, head, armor);
+    this.view.onLocalNearMiss = (close) => this.hud.onNearMiss(close);
     this.view.onLocalHurt = (yaw) => this.hud.onHurt(yaw);
     this.view.onLocalFlash = (s, d) => this.hud.onFlash(s, d);
     this.hud.view = this.view;

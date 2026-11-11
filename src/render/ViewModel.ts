@@ -38,6 +38,8 @@ export interface ViewModelState {
   stun?: number;
   /** Busy (firing / reloading / aiming) cancels an inspect. */
   busy?: boolean;
+  /** Rounds left in the held gun's magazine (an empty pistol holds its slide open). */
+  mag?: number;
 }
 
 type ItemKind = 'rifle' | 'pistol' | 'knife' | 'grenade' | 'bomb' | 'none';
@@ -70,6 +72,12 @@ export class ViewModel {
   private flash: Sprite;
   private flashT = 0;
   private kick = 0; private kickRot = 0;
+  /** Each shot also twists the gun a little to one side, so a spray never looks like one canned bounce. */
+  private kickYaw = 0; private kickRoll = 0;
+  /** Slow breathing drift while the gun is at the hip. */
+  private breathT = Math.random() * 10;
+  /** Slide / bolt held open on an empty magazine. */
+  private lockT = 0;
   private gait = new MovementCycle();
   private swayX = 0; private swayY = 0;
   private adsT = 0;
@@ -250,6 +258,8 @@ export class ViewModel {
     this.inspectT = 1;
     this.kick = Math.min(0.065, this.kick + 0.019 * kick);
     this.kickRot = Math.min(0.23, this.kickRot + 0.045 * kick);
+    this.kickYaw = clamp(this.kickYaw + (Math.random() - 0.5) * 0.03 * kick, -0.05, 0.05);
+    this.kickRoll = clamp(this.kickRoll + (Math.random() - 0.5) * 0.05 * kick, -0.07, 0.07);
     this.actionT = 0;
     if (this.kind === 'rifle' || this.kind === 'pistol') {
       this.flashT = this.suppressed ? 0.014 : this.launcher ? 0.07 : this.noShells ? 0 : 0.026;
@@ -322,6 +332,12 @@ export class ViewModel {
     this.swayY = damp(this.swayY, Math.max(-0.02, Math.min(0.02, s.lookDY * rate * 0.00035)), 14, dt);
     this.kick = damp(this.kick, 0, 14, dt);
     this.kickRot = damp(this.kickRot, 0, 12, dt);
+    this.kickYaw = damp(this.kickYaw, 0, 11, dt);
+    this.kickRoll = damp(this.kickRoll, 0, 9, dt);
+    this.breathT += dt;
+    // An empty gun stays locked open through the reload until the new magazine is seated, then the
+    // slide / bolt snaps home (the magazine counter only refills when the reload finishes).
+    this.lockT = damp(this.lockT, s.mag === 0 && s.reload < 0.8 ? 1 : 0, 26, dt);
     this.adsT = damp(this.adsT, s.ads ? 1 : 0, 16, dt);
     const landing = this.landing.update(dt);
     this.slashT = Math.min(1, this.slashT + dt / (this.stab ? 0.5 : 0.32));
@@ -335,10 +351,13 @@ export class ViewModel {
     this.flash.material.opacity = Math.min(1, Math.max(0, this.flashT / 0.012));
     this.actionT = Math.min(1, this.actionT + dt / this.cycleDuration);
     const cycle = Math.sin(Math.PI * Math.max(0, Math.min(1, (this.actionT - (this.cycleDuration > 0.2 ? 0.18 : 0)) / (this.cycleDuration > 0.2 ? 0.82 : 1))));
-    if (this.slide) this.slide.position.z = cycle * 0.033;
+    // An empty magazine holds a pistol's slide (or a self-loading bolt) open until the reload.
+    const manual = this.cycleDuration > 0.2;
+    const open = manual ? cycle : Math.max(cycle, this.lockT);
+    if (this.slide) this.slide.position.z = open * 0.033;
     if (this.bolt) {
-      this.bolt.position.z = cycle * (this.cycleDuration > 0.2 ? 0.07 : 0.025);
-      this.bolt.rotation.z = this.cycleDuration > 0.2 ? -cycle * 0.7 : 0;
+      this.bolt.position.z = open * (manual ? 0.07 : 0.025);
+      this.bolt.rotation.z = manual ? -cycle * 0.7 : 0;
     }
     if (this.pump) this.pump.position.z = cycle * 0.09;
     this.updateShells(dt);
@@ -363,6 +382,7 @@ export class ViewModel {
     p.y += Math.cos(this.gait.phase * 2) * 0.004 * bobAmt + (this.swayY - landing - s.crouch * 0.006 - this.airT * 0.012 - this.runT * 0.018) * hip;
     p.z += this.kick + ((forward - this.forwardT) * 0.022 + this.runT * 0.012) * hip;
     let rx = (this.kickRot + this.airT * 0.035) * hip + this.swayY * 2 * loose, ry = this.swayX * 2 * loose + hip * 0.09, rz = -this.strafeT * 0.025 * hip;
+    ry += this.kickYaw * hip; rz += this.kickRoll * hip;
     rx -= this.runT * 0.055 * hip;
     rz += this.runT * 0.04 * hip * side;
     p.y -= slidePose * 0.035 * (1 - this.adsT);
@@ -425,6 +445,12 @@ export class ViewModel {
     this.rig.position.copy(p);
     this.rig.rotation.set(rx, ry, rz);
     this.rig.scale.x = side;
+    // Standing still at the hip, the arms ride your breathing in a slow figure of eight. It is its
+    // own layer above the rig, so every pose above still settles exactly, and moving, firing or
+    // aiming fades it out, so it never shifts the sights.
+    const breath = hip * (1 - this.moveT) * (1 - slidePose) * (1 - Math.min(1, this.kickRot * 8));
+    this.aim.position.set(Math.sin(this.breathT * 0.85) * 0.0018 * breath * side, Math.sin(this.breathT * 1.7) * 0.0026 * breath, 0);
+    this.holder.rotation.x = Math.sin(this.breathT * 1.7 + 0.9) * 0.005 * breath;
     const reloadHand = s.reload > 0 ? Math.sin(Math.PI * Math.max(0, Math.min(1, (s.reload - 0.08) / 0.7))) : 0;
     this.armL.position.set(-reloadHand * 0.06, 0.01 - reloadHand * 0.16, (this.armL.userData.z ?? -0.25) + reloadHand * 0.12);
     if (this.pump) this.armL.position.z += cycle * 0.09;

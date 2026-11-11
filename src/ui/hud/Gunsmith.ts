@@ -14,11 +14,13 @@ type Which = 'primary' | 'secondary';
 interface Stat { label: string; base: (d: WeaponDef) => number; text: (d: WeaponDef) => string }
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+/** Standing spread from the hip (milliradians), with the attachments' hip-fire change. */
+const hipSpread = (d: WeaponDef) => d.spread.base + d.spread.stand * (d.spread.hip ?? 1);
 const STATS: Stat[] = [
   { label: 'Damage', base: (d) => clamp01((d.damage * (d.pellets ?? 1)) / 130), text: (d) => d.pellets ? `${Math.round(d.damage)}×${d.pellets}` : `${Math.round(d.damage)}` },
   { label: 'Range', base: (d) => clamp01((d.rangeMod - 0.7) / 0.3), text: (d) => `${Math.round(d.rangeMod * 100)}%` },
   { label: 'Recoil control', base: (d) => clamp01(1 - (d.recoil.climb + d.recoil.sway * 0.18 + d.recoil.kick * 0.25) / 3.2), text: (d) => `${(d.recoil.climb).toFixed(2)}°` },
-  { label: 'Hip-fire accuracy', base: (d) => clamp01(1 - (d.spread.base + d.spread.stand) / 30), text: (d) => `${(d.spread.base + d.spread.stand).toFixed(1)}` },
+  { label: 'Hip-fire accuracy', base: (d) => clamp01(1 - hipSpread(d) / 30), text: (d) => `${hipSpread(d).toFixed(1)}` },
   { label: 'Run-and-gun', base: (d) => clamp01(1 - d.spread.move / 190), text: (d) => `${Math.round(d.spread.move)}` },
   { label: 'ADS zoom', base: (d) => clamp01(((d.ads?.zoom ?? 1.18) - 1) / 1.6), text: (d) => `${(d.ads?.zoom ?? 1.18).toFixed(2)}×` },
   { label: 'Mobility', base: (d) => clamp01((d.moveSpeed - 4.4) / 1.9), text: (d) => `${Math.round(d.moveSpeed / 0.0254)} u/s` },

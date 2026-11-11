@@ -30,6 +30,8 @@ export class NavGrid {
         this.walk[row * this.cols + col] = blocked ? 0 : 1;
       }
     }
+    this.baseWalk = this.walk.slice();
+    this.blockCount = new Uint16Array(this.walk.length);
     this.computeClearance();
   }
 
@@ -55,28 +57,39 @@ export class NavGrid {
     }
   }
 
-  private saved = new Map<number, Map<number, number>>();
-  /** Temporarily mark an area unwalkable (runtime obstacles such as shields). */
+  /** Walkability of the map itself, before any runtime obstacle. */
+  private readonly baseWalk: Uint8Array;
+  /** Cells each runtime obstacle covers (by key), and how many obstacles cover each cell. */
+  private blockers = new Map<number, number[]>();
+  private blockCount: Uint16Array;
+
+  /**
+   * Mark an area unwalkable for a runtime obstacle (shield, barricade, Zombies shutter). Cells are
+   * counted, not saved and restored: overlapping obstacles (a shield just inside a boarded doorway)
+   * can come down in any order, and a cell opens again only once nothing covers it.
+   */
   block(key: number, minX: number, minZ: number, maxX: number, maxZ: number) {
-    const r = 0.45;
-    const prev = new Map<number, number>();
+    this.unblock(key);
+    const r = 0.45, cells: number[] = [];
     for (let row = this.rowOf(minZ - r); row <= this.rowOf(maxZ + r); row++) {
       for (let col = this.colOf(minX - r); col <= this.colOf(maxX + r); col++) {
         if (!this.inBounds(col, row)) continue;
         const i = row * this.cols + col;
-        prev.set(i, this.walk[i]);
+        cells.push(i);
+        this.blockCount[i]++;
         this.walk[i] = 0;
       }
     }
-    this.saved.set(key, prev);
+    this.blockers.set(key, cells);
   }
+  /** Remove an obstacle's block (nothing happens for a key that never blocked anything). */
   unblock(key: number) {
-    const prev = this.saved.get(key);
-    if (!prev) return;
-    for (const [i, v] of prev) this.walk[i] = v;
-    this.saved.delete(key);
+    const cells = this.blockers.get(key);
+    if (!cells) return;
+    this.blockers.delete(key);
+    for (const i of cells) if (--this.blockCount[i] === 0) this.walk[i] = this.baseWalk[i];
   }
-  unblockAll() { for (const k of [...this.saved.keys()]) this.unblock(k); }
+  unblockAll() { for (const k of [...this.blockers.keys()]) this.unblock(k); }
 
   colOf(x: number) { return Math.floor((x - this.minX) / this.cell); }
   rowOf(z: number) { return Math.floor((z - this.minZ) / this.cell); }

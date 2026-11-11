@@ -47,6 +47,12 @@ export interface Settings {
   paperDoll: PaperDollMode;
   /** Paper doll size (1 = 150 × 186 px). */
   paperDollSize: number;
+  /** Dotted arc of a grenade's flight while you hold it ready to throw. */
+  grenadePreview: boolean;
+  /** Numbers floating off whoever you damage. */
+  damageNumbers: boolean;
+  /** Badges around the crosshair pointing at live grenades that can hurt or blind you. */
+  grenadeWarnings: boolean;
   bindings: Record<Action, string>;
   crosshair: CrosshairSettings;
 }
@@ -90,7 +96,7 @@ export const DEFAULT_SETTINGS: Settings = {
   sensitivity: 2.0, zoomSensitivity: 1.0, invertY: false, fov: 90, viewmodelFov: 60, leftHanded: false,
   leanToggle: false, crouchMode: 'hold', adsToggle: false, showFps: true, rotateRadar: true, radarZoom: 1,
   masterVolume: 0.7, sfxVolume: 1, uiVolume: 0.6, renderScale: 1, quality: 'medium', aimAssist: 'low', killcam: true, announcer: true, objectiveMarkers: true, tips: true,
-  paperDoll: 'off', paperDollSize: 1,
+  paperDoll: 'off', paperDollSize: 1, grenadePreview: true, damageNumbers: true, grenadeWarnings: true,
   bindings: { ...DEFAULT_BINDINGS }, crosshair: { ...DEFAULT_CROSSHAIR },
 };
 

@@ -21,6 +21,8 @@ export interface SpreadDef {
   air: number;      // added while airborne
   perShot: number;  // added per shot fired
   recovery: number; // seconds to recover fire inaccuracy
+  /** × stand / crouch spread when not aiming down sights or scoped (attachments; absent = 1). */
+  hip?: number;
 }
 
 export interface RecoilDef {

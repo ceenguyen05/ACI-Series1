@@ -1,10 +1,10 @@
 import {
-  AdditiveBlending, BufferAttribute, BufferGeometry, Color, DoubleSide, DynamicDrawUsage, Group, InstancedMesh, Line,
-  LineBasicMaterial, Matrix4, Mesh, MeshBasicMaterial, NormalBlending, PlaneGeometry, PointLight, Points, Quaternion,
-  RingGeometry, ShaderMaterial, Vector3, type Blending, type Camera, type Scene, type Texture,
+  AdditiveBlending, BufferAttribute, BufferGeometry, Color, CylinderGeometry, DoubleSide, DynamicDrawUsage, Euler, Group, InstancedMesh,
+  Matrix4, Mesh, MeshBasicMaterial, MeshStandardMaterial, NormalBlending, PlaneGeometry, PointLight, Points, Quaternion,
+  RingGeometry, ShaderMaterial, SphereGeometry, Vector3, type Blending, type Camera, type Scene, type Texture,
 } from 'three';
 import { Random } from '../core/Random';
-import { bloodSplat, bulletHole, flareSprite, softSprite } from './Textures';
+import { bloodSplat, bulletHole, flareSprite, scorchMark, softSprite } from './Textures';
 
 // ============================================================================ particles
 export interface EmitOpts {
@@ -90,21 +90,227 @@ class ParticleSystem {
   clear() { this.life.fill(0); }
 }
 
+// ============================================================================ tracers
+const TRACER_N = 48;
+const _side = new Vector3(), _head = new Vector3(), _tail = new Vector3(), _toCam = new Vector3();
+/** Tracer opacity `d` metres from the muzzle: invisible at the gun, full strength from ~3 m out. */
+const tracerFade = (d: number) => Math.min(1, Math.max(0, (d - 0.7) / 2.6)) * 0.9;
+
+/**
+ * Bullet tracers as camera-facing streaks, all in one draw call. (GL lines are one pixel wide
+ * whatever the resolution, so line tracers all but vanish on a sharp display.) A streak leaves the
+ * muzzle, flies to the impact and shrinks into it; it fades in over the first few metres so your
+ * own shots never smear across the sights.
+ */
+class TracerBatch {
+  readonly mesh: Mesh;
+  private pos = new Float32Array(TRACER_N * 12);
+  private alpha = new Float32Array(TRACER_N * 4);
+  private items = Array.from({ length: TRACER_N }, () => ({ start: new Vector3(), dir: new Vector3(), len: 0, streak: 0, t: 1, dur: 0.05, live: false }));
+  private posAttr: BufferAttribute; private alphaAttr: BufferAttribute;
+  private cursor = 0;
+
+  constructor() {
+    const geo = new BufferGeometry();
+    const uv = new Float32Array(TRACER_N * 8), index = new Uint16Array(TRACER_N * 6);
+    for (let i = 0; i < TRACER_N; i++) {
+      uv.set([0, 0, 0, 1, 1, 0, 1, 1], i * 8);
+      const v = i * 4;
+      index.set([v, v + 1, v + 2, v + 2, v + 1, v + 3], i * 6);
+    }
+    this.posAttr = new BufferAttribute(this.pos, 3).setUsage(DynamicDrawUsage);
+    this.alphaAttr = new BufferAttribute(this.alpha, 1).setUsage(DynamicDrawUsage);
+    geo.setAttribute('position', this.posAttr);
+    geo.setAttribute('uv', new BufferAttribute(uv, 2));
+    geo.setAttribute('alpha', this.alphaAttr);
+    geo.setIndex(new BufferAttribute(index, 1));
+    const material = new ShaderMaterial({
+      vertexShader: `attribute float alpha; varying vec2 vUv; varying float vA;
+        void main(){ vUv = uv; vA = alpha; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      // a white-hot core inside a warm glow, thinning toward the tail
+      fragmentShader: `varying vec2 vUv; varying float vA;
+        void main(){
+          float y = abs(vUv.y - 0.5) * 2.0;
+          float core = exp(-y * y * 7.0);
+          float a = core * smoothstep(0.0, 0.45, vUv.x) * vA;
+          if (a < 0.004) discard;
+          gl_FragColor = vec4(mix(vec3(1.0, 0.6, 0.2), vec3(1.0, 0.95, 0.82), core * core), a);
+        }`,
+      transparent: true, depthWrite: false, blending: AdditiveBlending, side: DoubleSide,
+    });
+    this.mesh = new Mesh(geo, material);
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 1; // see Effects: under smoke clouds, so tracers never show through a smoke
+    this.mesh.visible = false;
+  }
+
+  add(start: Vector3, end: Vector3) {
+    const len = start.distanceTo(end);
+    if (len < 0.5) return;
+    let it = this.items.find((x) => !x.live);
+    if (!it) { it = this.items[this.cursor]; this.cursor = (this.cursor + 1) % TRACER_N; }
+    it.start.copy(start); it.dir.subVectors(end, start).divideScalar(len);
+    it.len = len; it.streak = Math.min(11, Math.max(2.5, len * 0.3));
+    it.dur = Math.max(0.055, (len + it.streak) / 380);
+    it.t = 0; it.live = true;
+  }
+
+  update(dt: number, cam: Vector3) {
+    let any = false, wrote = false;
+    for (let i = 0; i < TRACER_N; i++) {
+      const it = this.items[i];
+      if (!it.live) continue;
+      wrote = true;
+      it.t += dt / it.dur;
+      const travelled = it.t * (it.len + it.streak);
+      const head = Math.min(it.len, travelled), tail = Math.max(0, travelled - it.streak);
+      if (it.t >= 1 || tail >= it.len) { it.live = false; this.alpha.fill(0, i * 4, i * 4 + 4); continue; }
+      any = true;
+      _head.copy(it.start).addScaledVector(it.dir, head);
+      _tail.copy(it.start).addScaledVector(it.dir, tail);
+      _toCam.copy(cam).sub(_head);
+      const dist = _toCam.length();
+      _side.crossVectors(it.dir, _toCam);
+      const sl = _side.length();
+      if (sl < 1e-6) _side.set(0, 1, 0); else _side.divideScalar(sl);
+      // wide enough to cover a pixel or two at any range
+      _side.multiplyScalar(0.008 + dist * 0.0017);
+      const p = this.pos, o = i * 12;
+      p[o] = _tail.x - _side.x; p[o + 1] = _tail.y - _side.y; p[o + 2] = _tail.z - _side.z;
+      p[o + 3] = _tail.x + _side.x; p[o + 4] = _tail.y + _side.y; p[o + 5] = _tail.z + _side.z;
+      p[o + 6] = _head.x - _side.x; p[o + 7] = _head.y - _side.y; p[o + 8] = _head.z - _side.z;
+      p[o + 9] = _head.x + _side.x; p[o + 10] = _head.y + _side.y; p[o + 11] = _head.z + _side.z;
+      const a0 = tracerFade(tail), a1 = tracerFade(head);
+      this.alpha[i * 4] = a0; this.alpha[i * 4 + 1] = a0; this.alpha[i * 4 + 2] = a1; this.alpha[i * 4 + 3] = a1;
+    }
+    this.mesh.visible = any;
+    if (wrote) { this.posAttr.needsUpdate = true; this.alphaAttr.needsUpdate = true; }
+  }
+
+  clear() {
+    for (const it of this.items) { it.live = false; it.t = 1; }
+    this.alpha.fill(0); this.alphaAttr.needsUpdate = true;
+    this.mesh.visible = false;
+  }
+}
+
+// ============================================================================ spent casings
+const CASING_N = 56;
+export type CasingKind = 'brass' | 'small' | 'shell';
+const CASING_LOOK: Record<CasingKind, { color: string; scale: [number, number] }> = {
+  brass: { color: '#d6ad5a', scale: [1, 1] }, small: { color: '#d6ad5a', scale: [0.85, 0.62] }, shell: { color: '#b3261e', scale: [1.75, 1.55] },
+};
+
+/**
+ * Ejected brass in the world: it arcs away from the gun, bounces once or twice on the floor and
+ * lies there for a few seconds. One instanced mesh, a fixed pool, no allocation per shot.
+ */
+class CasingPool {
+  readonly mesh: InstancedMesh;
+  private items = Array.from({ length: CASING_N }, () => ({ p: new Vector3(), v: new Vector3(), r: new Euler(), spin: new Vector3(), ground: 0, life: 0, delay: 0, bounces: 0, sx: 1, sy: 1 }));
+  private cursor = 0;
+  private live = 0;
+  private obj = new Matrix4();
+  private q = new Quaternion();
+  private s = new Vector3();
+  private color = new Color();
+  /** Called on a casing's first bounce (the tinkle of brass on the floor). */
+  onBounce: (pos: Vector3, kind: CasingKind) => void = () => {};
+  private kinds: CasingKind[] = new Array(CASING_N).fill('brass');
+
+  constructor() {
+    const mat = new MeshStandardMaterial({ color: '#ffffff', roughness: 0.34, metalness: 0.78, emissive: '#2a2110', emissiveIntensity: 0.5 });
+    this.mesh = new InstancedMesh(new CylinderGeometry(0.0052, 0.0056, 0.028, 7), mat, CASING_N);
+    this.mesh.frustumCulled = false;
+    this.s.setScalar(0);
+    for (let i = 0; i < CASING_N; i++) { this.obj.compose(this.items[i].p, this.q, this.s); this.mesh.setMatrixAt(i, this.obj); this.mesh.setColorAt(i, this.color.set('#d6ad5a')); }
+    this.mesh.visible = false;
+  }
+
+  spawn(pos: Vector3, vel: Vector3, ground: number, kind: CasingKind, delay: number, rng: Random) {
+    const i = this.cursor; this.cursor = (this.cursor + 1) % CASING_N;
+    const c = this.items[i], look = CASING_LOOK[kind];
+    c.p.copy(pos); c.v.copy(vel); c.ground = ground; c.life = 5.5; c.delay = delay; c.bounces = 0;
+    c.r.set(rng.range(0, 6.28), rng.range(0, 6.28), rng.range(0, 6.28));
+    c.spin.set(rng.range(-22, 22), rng.range(-8, 8), rng.range(-22, 22));
+    c.sx = look.scale[0]; c.sy = look.scale[1];
+    this.kinds[i] = kind;
+    this.mesh.setColorAt(i, this.color.set(look.color));
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;
+    this.live = Math.max(this.live, 1);
+  }
+
+  update(dt: number) {
+    if (!this.live) { this.mesh.visible = false; return; }
+    let live = 0;
+    for (let i = 0; i < CASING_N; i++) {
+      const c = this.items[i];
+      if (c.life <= 0) continue;
+      if (c.delay > 0) { c.delay -= dt; live++; this.s.setScalar(0); this.obj.compose(c.p, this.q, this.s); this.mesh.setMatrixAt(i, this.obj); continue; }
+      c.life -= dt;
+      if (c.life <= 0) { this.s.setScalar(0); this.obj.compose(c.p, this.q, this.s); this.mesh.setMatrixAt(i, this.obj); continue; }
+      live++;
+      const rest = c.ground + 0.006 * c.sx;
+      if (c.v.lengthSq() > 0) {
+        c.v.y -= 9.8 * dt;
+        c.p.addScaledVector(c.v, dt);
+        c.r.x += c.spin.x * dt; c.r.y += c.spin.y * dt; c.r.z += c.spin.z * dt;
+        if (c.p.y <= rest && c.v.y < 0) {
+          c.p.y = rest;
+          if (c.bounces === 0) this.onBounce(c.p, this.kinds[i]);
+          c.bounces++;
+          if (-c.v.y > 0.7 && c.bounces < 4) { c.v.y *= -0.38; c.v.x *= 0.55; c.v.z *= 0.55; c.spin.multiplyScalar(0.6); }
+          else { c.v.set(0, 0, 0); c.r.x = Math.PI / 2; c.r.z = 0; } // settles on its side
+        }
+      }
+      const k = Math.min(1, c.life / 0.5);
+      this.s.set(c.sx * k, c.sy * k, c.sx * k);
+      this.obj.compose(c.p, this.q.setFromEuler(c.r), this.s);
+      this.mesh.setMatrixAt(i, this.obj);
+    }
+    this.live = live;
+    this.mesh.visible = live > 0;
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  clear() {
+    this.s.setScalar(0);
+    for (let i = 0; i < CASING_N; i++) { this.items[i].life = 0; this.obj.compose(this.items[i].p, this.q.identity(), this.s); this.mesh.setMatrixAt(i, this.obj); }
+    this.mesh.instanceMatrix.needsUpdate = true;
+    this.live = 0; this.mesh.visible = false;
+  }
+}
+
 // ============================================================================ effects manager
-interface Tracer { line: Line; start: Vector3; end: Vector3; t: number; len: number }
 interface SmokeFx { id: number; mesh: InstancedMesh; offsets: Vector3[]; angles: number[]; scales: number[]; mat: MeshBasicMaterial }
 interface FireFx { id: number; mesh: InstancedMesh; offsets: Vector3[]; phase: number[]; light: PointLight | null }
 interface Ring { mesh: Mesh; t: number; dur: number; maxR: number }
 interface Flash { light: PointLight; t: number; dur: number; intensity: number }
+interface Shock { mesh: Mesh; mat: MeshBasicMaterial; t: number; dur: number; radius: number }
+interface Scorch { mesh: Mesh; mat: MeshBasicMaterial; age: number }
 
 const SMOKE_N = 46, FIRE_N = 26;
 const _m = new Matrix4(), _q = new Quaternion(), _q2 = new Quaternion(), _s = new Vector3(), _p = new Vector3(), _z = new Vector3(0, 0, 1);
+const _v = new Vector3(), _up = new Vector3(0, 1, 0);
+/** Seconds a scorch mark stays before it fades (it also clears with the round). */
+const SCORCH_LIFE = 45;
 
 export class Effects {
   readonly group = new Group();
   private sparks: ParticleSystem;
   private dust: ParticleSystem;
-  private tracers: Tracer[] = [];
+  private tracers = new TracerBatch();
+  private casings = new CasingPool();
+  private shocks: Shock[] = [];
+  private scorches: Scorch[] = [];
+  private scorchIdx = 0;
+  /**
+   * Floor height under a point (set by the match view). Effects that touch the ground (brass,
+   * scorch marks) use it; without it they fall back to y = 0.
+   */
+  groundAt: ((x: number, z: number, y: number) => number) | null = null;
+  /** A spent casing's first bounce (the view plays the tinkle). */
+  onCasingBounce: (pos: Vector3, kind: CasingKind) => void = () => {};
   private decals: Mesh[] = [];
   private decalIdx = 0;
   private bloods: Mesh[] = [];
@@ -121,15 +327,29 @@ export class Effects {
   constructor() {
     this.sparks = new ParticleSystem(600, flareSprite(), AdditiveBlending);
     this.dust = new ParticleSystem(900, softSprite(), NormalBlending);
-    this.group.add(this.sparks.points, this.dust.points);
-    const tracerMat = new LineBasicMaterial({ color: '#ffd890', transparent: true, opacity: 0.85, blending: AdditiveBlending, depthWrite: false });
-    for (let i = 0; i < 48; i++) {
-      const g = new BufferGeometry();
-      g.setAttribute('position', new BufferAttribute(new Float32Array(6), 3).setUsage(DynamicDrawUsage));
-      const line = new Line(g, tracerMat);
-      line.visible = false; line.frustumCulled = false;
-      this.group.add(line);
-      this.tracers.push({ line, start: new Vector3(), end: new Vector3(), t: 1, len: 0 });
+    this.group.add(this.sparks.points, this.dust.points, this.tracers.mesh, this.casings.mesh);
+    // Draw order among the see-through effects: dust and debris, then glowing sparks and tracers (a
+    // fireball glows through its own smoke), then smoke grenade clouds over both, so a muzzle flash or
+    // tracer inside a smoke never gives a shooter away.
+    this.sparks.points.renderOrder = 1;
+    this.casings.onBounce = (pos, kind) => this.onCasingBounce(pos, kind);
+    // blast pressure waves: a few reusable shells that swell and fade
+    const shockGeo = new SphereGeometry(1, 24, 14);
+    for (let i = 0; i < 4; i++) {
+      const mat = new MeshBasicMaterial({ color: '#ffd9a8', transparent: true, opacity: 0, blending: AdditiveBlending, depthWrite: false, side: DoubleSide });
+      const mesh = new Mesh(shockGeo, mat);
+      mesh.visible = false; mesh.renderOrder = 2;
+      this.group.add(mesh);
+      this.shocks.push({ mesh, mat, t: 1, dur: 0.2, radius: 1 });
+    }
+    const scorchGeo = new PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    for (let i = 0; i < 10; i++) {
+      const mat = new MeshBasicMaterial({ map: scorchMark(), transparent: true, opacity: 0, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -3 });
+      const mesh = new Mesh(scorchGeo, mat);
+      // on the floor: drawn before every see-through effect, so smoke in front of it covers it
+      mesh.visible = false; mesh.renderOrder = -1;
+      this.group.add(mesh);
+      this.scorches.push({ mesh, mat, age: SCORCH_LIFE });
     }
     const holeMat = new MeshBasicMaterial({ map: bulletHole(), transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4 });
     const holeGeo = new PlaneGeometry(0.11, 0.11);
@@ -170,16 +390,7 @@ export class Effects {
     this.flashes.push({ light: l, t: 0, dur, intensity });
   }
 
-  tracer(start: Vector3, end: Vector3) {
-    const tr = this.tracers.find((t) => t.t >= 1) ?? this.tracers[0];
-    tr.start.copy(start); tr.end.copy(end); tr.t = 0; tr.len = start.distanceTo(end);
-    const arr = tr.line.geometry.getAttribute('position') as BufferAttribute;
-    arr.setXYZ(0, start.x, start.y, start.z);
-    const head = start.clone().lerp(end, Math.min(1, 1.5 / Math.max(0.001, tr.len)));
-    arr.setXYZ(1, head.x, head.y, head.z);
-    arr.needsUpdate = true;
-    tr.line.visible = true;
-  }
+  tracer(start: Vector3, end: Vector3) { this.tracers.add(start, end); }
 
   impact(point: Vector3, normal: Vector3, surface: string) {
     const d = this.decals[this.decalIdx]; this.decalIdx = (this.decalIdx + 1) % this.decals.length;
@@ -193,6 +404,19 @@ export class Effects {
     d.scale.setScalar(soft ? 1.15 : metal ? 0.7 : 1);
     this.dust.emit({ pos: point, count: glass ? 3 : soft ? 4 : 6, speed: 1.2, dir: normal, spread: 0.6, life: [0.12, 0.38], size: [0.045, 0.22], color: surface === 'wood' ? '#a07848' : '#aaa69e', alpha: 0.42, gravity: 2, drag: 4 });
     if (metal || glass) this.sparks.emit({ pos: point, count: metal ? 7 : 4, speed: metal ? 6 : 3, dir: normal, spread: 0.75, life: [0.06, 0.2], size: [0.035, 0.008], color: glass ? '#d4eeff' : '#ffc870', gravity: 9 });
+    // chips knocked loose: masonry flakes, wood splinters and glass fragments fall away under gravity
+    else this.dust.emit({ pos: point, count: soft ? 2 : 3, speed: 2.6, dir: normal, spread: 0.9, life: [0.25, 0.55], size: [0.022, 0.03],
+      color: surface === 'wood' ? '#8a6238' : surface === 'fabric' ? '#8d8f8a' : '#c9c5bb', alpha: 0.95, gravity: 9, drag: 0.6 });
+    if (glass) this.dust.emit({ pos: point, count: 3, speed: 2.2, dir: normal, spread: 1, life: [0.25, 0.5], size: [0.018, 0.024], color: '#dff2ff', alpha: 0.9, gravity: 9, drag: 0.5 });
+  }
+
+  /**
+   * Eject a spent casing into the world. `delay` holds it back for a manual action (a pump or a
+   * bolt throws the case when it is cycled, not when the shot breaks).
+   */
+  casing(pos: Vector3, vel: Vector3, kind: CasingKind = 'brass', delay = 0) {
+    const land = _v.copy(pos).addScaledVector(vel, 0.4);
+    this.casings.spawn(pos, vel, this.groundAt ? this.groundAt(land.x, land.z, pos.y) : 0, kind, delay, this.rng);
   }
 
   blood(point: Vector3, dir: Vector3, head: boolean) {
@@ -223,14 +447,55 @@ export class Effects {
     this.pulseRing(pos, '#d0e0ff', 7);
   }
 
-  muzzle(pos: Vector3) {
-    this.lightFlash(pos, 0xffc070, 6, 0.06, 8);
+  /**
+   * A gunshot's light. With `dir`, also the flash everyone else sees at the muzzle: a hot core, a
+   * few sparks thrown forward and a wisp of smoke (`scale` 0.3 for a suppressor or flash hider).
+   * Your own gun draws its flash in the view model, so the local shot passes no direction.
+   */
+  muzzle(pos: Vector3, dir?: Vector3, scale = 1) {
+    this.lightFlash(pos, 0xffc070, 6 * Math.min(1, scale + 0.3), 0.06, 8);
+    if (!dir) return;
+    const tip = _v.copy(pos).addScaledVector(dir, 0.22);
+    this.sparks.emit({ pos: tip, count: 1, speed: 0, life: [0.045, 0.06], size: [0.5 * scale, 0.16 * scale], color: '#ffe2ac' });
+    if (scale < 0.5) return;
+    this.sparks.emit({ pos: tip, count: 3, speed: 9, dir, spread: 0.3, life: [0.03, 0.08], size: [0.16, 0.03], color: '#ffc46a' });
+    this.dust.emit({ pos: tip, count: 1, speed: 0.9, dir, spread: 0.5, life: [0.3, 0.7], size: [0.07, 0.42], color: '#a8a8a4', alpha: 0.16, drag: 2.5, up: 0.25 });
+  }
+
+  /** Dust kicked up at someone's feet: a hard landing, or a slide. */
+  footDust(pos: Vector3, amount = 1, dir?: Vector3) {
+    this.dust.emit({ pos, count: Math.round(5 * amount), speed: 1.3, dir: dir ?? _up, spread: dir ? 0.7 : 1.4, life: [0.35, 0.8], size: [0.12, 0.55], color: '#b4aea2', alpha: 0.22, drag: 3, up: 0.25 });
+  }
+
+  /** Pressure wave: a faint shell that swells to `radius` in a fraction of a second. */
+  private shock(pos: Vector3, radius: number, dur = 0.22, color = 0xffd9a8) {
+    const s = this.shocks.find((x) => x.t >= 1) ?? this.shocks[0];
+    s.mesh.position.copy(pos); s.mat.color.setHex(color);
+    s.t = 0; s.dur = dur; s.radius = radius;
+    s.mesh.scale.setScalar(0.2); s.mesh.visible = true;
+  }
+
+  /** Burn the floor under a blast (only when it went off near the ground). */
+  private scorch(pos: Vector3, size: number) {
+    const ground = this.groundAt ? this.groundAt(pos.x, pos.z, pos.y + 0.3) : 0;
+    if (pos.y - ground > 1.6) return;
+    const s = this.scorches[this.scorchIdx]; this.scorchIdx = (this.scorchIdx + 1) % this.scorches.length;
+    s.mesh.position.set(pos.x, ground + 0.012, pos.z);
+    s.mesh.rotation.y = this.rng.next() * 6.28;
+    s.mesh.scale.setScalar(size);
+    s.age = 0; s.mat.opacity = 0.85; s.mesh.visible = true;
   }
 
   explosion(pos: Vector3) {
     this.sparks.emit({ pos, count: 60, speed: 14, life: [0.2, 0.6], size: [0.4, 0.1], color: '#ffb040', gravity: 6, up: 2 });
+    // fireball: a white-hot core inside rolling orange, gone in a quarter of a second
+    this.sparks.emit({ pos, count: 1, speed: 0, life: [0.09, 0.11], size: [3.4, 1.2], color: '#fff2d0' });
+    this.sparks.emit({ pos, count: 10, speed: 3.2, life: [0.12, 0.28], size: [1.3, 0.5], color: '#ff9a34', up: 0.8 });
     this.dust.emit({ pos, count: 40, speed: 5, life: [0.8, 2.0], size: [0.6, 2.6], color: '#4a4440', alpha: 0.7, drag: 2, up: 1.5 });
+    this.dust.emit({ pos, count: 16, speed: 9, life: [0.4, 1.1], size: [0.09, 0.14], color: '#2a2622', alpha: 0.95, gravity: 9, up: 3 }); // debris
     this.lightFlash(pos.clone().setY(pos.y + 0.5), 0xffa040, 80, 0.35, 18);
+    this.shock(pos, 5.5);
+    this.scorch(pos, 3.2);
   }
 
   /** Explosion scaled by blast radius (rockets, C4, killstreaks). */
@@ -238,9 +503,12 @@ export class Effects {
     const k = Math.max(0.6, radius / 4.5);
     this.sparks.emit({ pos, count: Math.round(50 * k), speed: 12 * Math.sqrt(k), life: [0.2, 0.7], size: [0.5 * k, 0.1], color: '#ffb040', gravity: 6, up: 2 });
     this.sparks.emit({ pos, count: Math.round(20 * k), speed: 4 * k, life: [0.1, 0.3], size: [1.6 * k, 0.4], color: '#ffe0a0' });
+    this.sparks.emit({ pos, count: 1, speed: 0, life: [0.1, 0.13], size: [4 * k, 1.4 * k], color: '#fff2d0' });
     this.dust.emit({ pos, count: Math.round(36 * k), speed: 4.5 * Math.sqrt(k), life: [1.0, 2.6], size: [0.8 * k, 3.2 * k], color: '#3e3a36', alpha: 0.75, drag: 2, up: 1.4 });
     this.dust.emit({ pos, count: Math.round(14 * k), speed: 9 * Math.sqrt(k), life: [0.4, 1.2], size: [0.1, 0.25], color: '#2a2622', alpha: 0.9, gravity: 9, up: 3 });
     this.lightFlash(pos.clone().setY(pos.y + 0.6), 0xffa040, 90 * k, 0.4, 14 + radius * 2);
+    this.shock(pos, radius * 1.15, 0.2 + radius * 0.012);
+    this.scorch(pos, Math.min(9, radius * 0.8));
   }
 
   /** Smoke + embers left behind a rocket each frame. */
@@ -288,6 +556,7 @@ export class Effects {
         const mat = new MeshBasicMaterial({ map: this.smokeTex, color: '#b9bdbf', transparent: true, depthWrite: false, opacity: 1 });
         const mesh = new InstancedMesh(new PlaneGeometry(1, 1), mat, SMOKE_N);
         mesh.frustumCulled = false;
+        mesh.renderOrder = 2;
         const offsets: Vector3[] = [], angles: number[] = [], scales: number[] = [];
         for (let i = 0; i < SMOKE_N; i++) {
           const v = new Vector3(this.rng.range(-1, 1), this.rng.range(-0.55, 0.8), this.rng.range(-1, 1));
@@ -336,16 +605,21 @@ export class Effects {
     this.dust.material.uniforms.scale.value = scale;
     this.sparks.update(dt);
     this.dust.update(dt);
-    for (const tr of this.tracers) {
-      if (tr.t >= 1) { tr.line.visible = false; continue; }
-      tr.t = Math.min(1, tr.t + dt / Math.max(0.045, tr.len / 700));
-      const head = Math.min(1, tr.t + 1.5 / Math.max(1, tr.len));
-      const a = _p.copy(tr.start).lerp(tr.end, tr.t);
-      const arr = (tr.line.geometry.getAttribute('position') as BufferAttribute);
-      arr.setXYZ(0, a.x, a.y, a.z);
-      const b = a.copy(tr.start).lerp(tr.end, head);
-      arr.setXYZ(1, b.x, b.y, b.z);
-      arr.needsUpdate = true;
+    this.tracers.update(dt, camera.getWorldPosition(_v));
+    this.casings.update(dt);
+    for (const s of this.shocks) {
+      if (s.t >= 1) continue;
+      s.t = Math.min(1, s.t + dt / s.dur);
+      const e = 1 - (1 - s.t) * (1 - s.t);
+      s.mesh.scale.setScalar(Math.max(0.2, s.radius * e));
+      s.mat.opacity = 0.2 * (1 - s.t) * (1 - s.t);
+      if (s.t >= 1) s.mesh.visible = false;
+    }
+    for (const s of this.scorches) {
+      if (!s.mesh.visible) continue;
+      s.age += dt;
+      s.mat.opacity = 0.85 * Math.min(1, (SCORCH_LIFE - s.age) / 6);
+      if (s.age >= SCORCH_LIFE) s.mesh.visible = false;
     }
     for (let i = this.flashes.length - 1; i >= 0; i--) {
       const f = this.flashes[i];
@@ -419,7 +693,10 @@ export class Effects {
     this.sparks.clear(); this.dust.clear();
     for (const d of this.decals) d.visible = false;
     for (const d of this.bloods) d.visible = false;
-    for (const t of this.tracers) { t.t = 1; t.line.visible = false; }
+    this.tracers.clear();
+    this.casings.clear();
+    for (const s of this.shocks) { s.t = 1; s.mesh.visible = false; }
+    for (const s of this.scorches) { s.age = SCORCH_LIFE; s.mesh.visible = false; }
     this.sync([], []);
     for (const ring of this.rings) { this.group.remove(ring.mesh); ring.mesh.geometry.dispose(); (ring.mesh.material as MeshBasicMaterial).dispose(); }
     this.rings = [];

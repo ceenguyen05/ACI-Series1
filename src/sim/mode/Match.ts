@@ -312,7 +312,8 @@ export class Match implements SimContext, MatchQuery {
     this.events.emit('hit', { attackerId: attacker?.id ?? -1, victimId: victim.id, amount, armorDamage: dmg.armor, group, point, source, wallbang: !!flags.wallbang });
     this.bots.get(victim.id)?.onDamaged(attacker);
     // getting shot pulls you off camera feeds (not off a missile you're steering — dying does that)
-    if (victim.operating !== null && source !== 'fire' && this.gadgets.get(victim.operating)?.kind !== 'missile') this.gadgets.operate(victim, null);
+    // (burning counts: standing in a fire is exactly when you need your eyes back)
+    if (victim.operating !== null && this.gadgets.get(victim.operating)?.kind !== 'missile') this.gadgets.operate(victim, null);
     if (victim.health <= 0) this.kill(victim, attacker, source, group === 'head', dir, !!flags.wallbang);
   }
 
@@ -370,8 +371,9 @@ export class Match implements SimContext, MatchQuery {
       case 'utility': a.grenades[item.id]++; break;
       case 'gadget': a.gadgets[item.id] = item.id === 'stim' ? 3 : a.gadgets[item.id] + 1; break;
       case 'gear':
-        if (item.id === 'kevlar') a.armor = 100;
-        else if (item.id === 'helmet') { a.armor = 100; a.helmet = true; }
+        // never lower armor already raised by plates (up to 150)
+        if (item.id === 'kevlar') a.armor = Math.max(a.armor, 100);
+        else if (item.id === 'helmet') { a.armor = Math.max(a.armor, 100); a.helmet = true; }
         else if (item.id === 'kit') a.hasKit = true;
         else if (item.id === 'plate') a.armor = Math.min(150, Math.max(a.armor, 0) + 25);
         else if (item.id === 'crowbar') a.hasCrowbar = true;
@@ -407,8 +409,12 @@ export class Match implements SimContext, MatchQuery {
     const want = new Map<string, number>();
     for (const item of a.lastBuys) want.set(itemKey(item), (want.get(itemKey(item)) ?? 0) + 1);
     const have = (item: BuyItem) => item.kind === 'utility' ? a.grenades[item.id] : item.kind === 'gadget' ? a.gadgets[item.id] : 0;
-    for (const item of a.lastBuys) {
+    // Only the last gun bought for each slot: a P-30 swapped for a Judge last round is not bought again.
+    const lastGun = new Map<string, number>();
+    a.lastBuys.forEach((item, i) => { if (item.kind === 'weapon') lastGun.set(WEAPONS[item.id].slot, i); });
+    for (const [i, item] of a.lastBuys.entries()) {
       if (item.kind === 'attachment') continue;
+      if (item.kind === 'weapon' && lastGun.get(WEAPONS[item.id].slot) !== i) continue;
       if ((item.kind === 'utility' || item.kind === 'gadget') && have(item) >= (want.get(itemKey(item)) ?? 0)) continue;
       if (this.tryBuy(a, item)) n++;
     }
@@ -614,7 +620,8 @@ export class Match implements SimContext, MatchQuery {
         attacker.stats.score += 2;
         if (headshot) attacker.stats.headshots++;
         this.addMoney(attacker, killReward(source), 'Kill');
-        this.killstreaks.onKill(attacker, source);
+        // a frag or fire that kills after you died counts for nothing: the streak is per life
+        if (attacker.alive) this.killstreaks.onKill(attacker, source);
       } else {
         attacker.stats.kills--;
         this.addMoney(attacker, ECONOMY.teamKillPenalty, 'Team kill');
@@ -717,7 +724,8 @@ export class Match implements SimContext, MatchQuery {
     const steering = this.gadgets.get(a.operating)?.kind === 'missile'; // no bailing out of a missile
     if (cmd.cams && !steering) {
       if (a.operating !== null) this.gadgets.operate(a, null);
-      else if (!a.isPlanting && !a.isDefusing) this.gadgets.cycle(a, 0);
+      // not during freeze time: CCTV would show the attackers' spawn, which changes every round
+      else if (!a.isPlanting && !a.isDefusing && !this.isFrozen()) this.gadgets.cycle(a, 0);
     } else if (a.operating !== null && cmd.camCycle && !steering) this.gadgets.cycle(a, cmd.camCycle);
     if (a.operating !== null) {
       const firePressed = cmd.fire && !this.prevFire.get(a.id);

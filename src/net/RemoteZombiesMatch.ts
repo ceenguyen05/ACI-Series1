@@ -21,8 +21,7 @@ export class RemoteZombiesMatch extends ZombiesMatch {
   receiveSnapshot() { this.replica.receiveSnapshot(); }
   override step(dt: number) { this.replica.step(this.playerCmd, dt); }
   override buyArmory(a: Agent, item: ArmoryId) {
-    const it = this.interactionFor(a);
-    if (a !== this.player || it?.kind !== 'armory' || this.armoryBlocker(a, item)) return false;
+    if (a !== this.player || !this.nearArmory(a) || this.armoryBlocker(a, item)) return false;
     this.client.send({ type: 'armory', item }); return true;
   }
   override tryBuy() { return false; }

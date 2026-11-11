@@ -14,7 +14,8 @@ export type DamageKind = 'bullet' | 'melee' | 'explosion' | 'dart';
 
 /** How hard each kind of damage hits each device (default 1). */
 const DAMAGE_MULT: Partial<Record<DeviceKind, Partial<Record<DamageKind, number>>>> = {
-  barricade: { bullet: 0.25, melee: 1, explosion: 3, dart: 1 },
+  // one stim dart (100) takes a 120 HP wooden barricade down, as the stim pistol promises
+  barricade: { bullet: 0.25, melee: 1, explosion: 3, dart: 1.2 },
   steelBarricade: { bullet: 0, melee: 0.06, explosion: 2.5, dart: 0.08 },
   shield: { explosion: 2.5 },
 };
@@ -46,7 +47,8 @@ export interface Device {
   lastScan: number;
   lastAlert: number;
   collider: Box | null;
-  ai: { path: NavPoint[] | null; idx: number; tx: number; tz: number } | null;
+  /** Route state for autonomous devices; `goalId` is the agent a Hunter Drone is flying to. */
+  ai: { path: NavPoint[] | null; idx: number; tx: number; tz: number; goalId?: number } | null;
   jumpHeld: boolean;
   /** Barricade footprint (doorway) – used by the renderer. */
   size?: { w: number; h: number; t: number; alongX: boolean };
@@ -102,7 +104,8 @@ export class GadgetManager {
 
   private release(d: Device) {
     if (d.collider) { this.ctx.world.collision.removeDynamic(d.collider); d.collider = null; }
-    if (d.kind === 'shield') this.ctx.world.nav.unblock(d.id);
+    // shields and barricades both block bot routes; anything else has no block to lift
+    this.ctx.world.nav.unblock(d.id);
   }
 
   // ------------------------------------------------------------------ deploying
@@ -396,7 +399,8 @@ export class GadgetManager {
     d.vel.z += clamp(wz * G.droneSpeed - d.vel.z, -accel * dt, accel * dt);
     if (jump && !d.jumpHeld && d.onGround) { d.vel.y = G.droneHop; d.onGround = false; }
     d.jumpHeld = jump;
-    if (l > 0.1 && d.onGround && Math.random() < dt * 3) this.ctx.noise(d.pos, 7, null, 'footstep');
+    // the match's seeded random stream, so a seeded match with drones replays identically
+    if (l > 0.1 && d.onGround && this.ctx.rng.next() < dt * 3) this.ctx.noise(d.pos, 7, null, 'footstep');
     this.moveBox(d.pos, d.vel, G.droneRadius, G.droneHeight, dt, d);
   }
 
@@ -530,8 +534,8 @@ export class GadgetManager {
         }
         case 'flockCam': {
           if (jammed) break;
-          // slow sweep, like a real auto-scan camera
-          d.yaw = wrapAngle(d.baseYaw + Math.sin((now - d.createdAt) * 0.6) * 0.5);
+          // slow sweep, like a real auto-scan camera; it holds still while someone steers it from the feed
+          if (!ctx.agents.some((a) => a.operating === d.id)) d.yaw = wrapAngle(d.baseYaw + Math.sin((now - d.createdAt) * 0.6) * 0.5);
           const seen = this.scan(d, G.scanFov, G.flockRange, true);
           if (seen.length && now - d.lastAlert > 6) {
             d.lastAlert = now;
@@ -565,15 +569,25 @@ export class GadgetManager {
     const owner = ctx.agents.find((a) => a.id === d.ownerId) ?? null;
     const foes = ctx.agents.filter((a) => a.alive && a.team !== d.team);
     if (!foes.length || now - d.createdAt > 30) { this.blowHunter(d, owner); return; }
-    const target = foes.reduce((b, a) => (a.pos.distanceTo(d.pos) < b.pos.distanceTo(d.pos) ? a : b));
-    const aim = target.centerPos(new Vector3());
-    if (aim.distanceTo(d.pos) < 2.2) { this.blowHunter(d, owner); return; }
+    const nearest = foes.reduce((b, a) => (a.pos.distanceTo(d.pos) < b.pos.distanceTo(d.pos) ? a : b));
+    if (nearest.centerPos(tA).distanceTo(d.pos) < 2.2) { this.blowHunter(d, owner); return; }
     const ai = d.ai!;
-    if (!ai.path || now - d.lastScan > 0.8 || Math.hypot(ai.tx - target.pos.x, ai.tz - target.pos.z) > 2) {
+    let goal = foes.find((a) => a.id === ai.goalId) ?? null;
+    if (!ai.path || !goal || now - d.lastScan > 0.8 || Math.hypot(ai.tx - goal.pos.x, ai.tz - goal.pos.z) > 2) {
       d.lastScan = now;
-      ai.path = ctx.world.nav.findPath(d.pos.x, d.pos.z, target.pos.x, target.pos.z) ?? [];
-      ai.idx = 0; ai.tx = target.pos.x; ai.tz = target.pos.z;
+      // The nearest enemy it can actually reach: one behind boarded-up doorways may have no route
+      // at all, and the drone must never cut straight through the walls to get there.
+      goal = null; ai.path = null;
+      for (const f of [...foes].sort((p, q) => p.pos.distanceToSquared(d.pos) - q.pos.distanceToSquared(d.pos))) {
+        const path = ctx.world.nav.findPath(d.pos.x, d.pos.z, f.pos.x, f.pos.z);
+        if (path) { goal = f; ai.path = path; break; }
+      }
+      ai.idx = 0; ai.goalId = goal?.id ?? -1;
+      if (goal) { ai.tx = goal.pos.x; ai.tz = goal.pos.z; }
     }
+    if (ctx.rng.next() < dt * 4) ctx.noise(d.pos, 22, null, 'footstep');
+    if (!goal || !ai.path) { d.vel.set(0, 0, 0); d.pos.y += (1.95 - d.pos.y) * Math.min(1, dt * 3); return; } // nobody reachable: hover
+    const aim = goal.centerPos(new Vector3());
     let wp = ai.path[ai.idx];
     while (wp && Math.hypot(wp.x - d.pos.x, wp.z - d.pos.z) < 0.6) wp = ai.path[++ai.idx];
     const tx = wp ? wp.x : aim.x, tz = wp ? wp.z : aim.z;
@@ -581,10 +595,15 @@ export class GadgetManager {
     const speed = 7.2;
     d.vel.set((dx / len) * speed, 0, (dz / len) * speed);
     d.yaw = yawTo(dx, dz);
-    d.pos.x += d.vel.x * dt; d.pos.z += d.vel.z * dt;
+    // Never through a wall or barricade: a route can still clip a corner, and the last dash goes
+    // straight at the target. Checked at chest height (the nav grid only promises clearance up to a
+    // standing head; every doorway is taller than the drone flies). Blocked, it waits for a re-plan.
+    tA.set(d.pos.x, Math.min(d.pos.y, 1.75), d.pos.z);
+    tB.set(d.pos.x + d.vel.x * dt, tA.y, d.pos.z + d.vel.z * dt);
+    if (ctx.world.collision.segmentBlocked(tA, tB)) { d.vel.set(0, 0, 0); d.lastScan = Math.min(d.lastScan, now - 0.6); }
+    else { d.pos.x = tB.x; d.pos.z = tB.z; }
     const alt = (!wp ? aim.y : 1.95);
     d.pos.y += (alt - d.pos.y) * Math.min(1, dt * 3);
-    if (Math.random() < dt * 4) ctx.noise(d.pos, 22, null, 'footstep');
   }
 
   private blowHunter(d: Device, owner: Agent | null) {
@@ -757,7 +776,8 @@ export class GadgetManager {
         d.onGround = true;
         if (t.aiTarget) d.ai = { path: null, idx: 0, tx: t.aiTarget.x, tz: t.aiTarget.z };
         const owner = ctx.agents.find((a) => a.id === t.ownerId);
-        if (owner && !owner.isBot && owner.alive) this.operate(owner, d.id);
+        // a planter or defuser keeps both hands on the bomb; they can open the feed with T afterwards
+        if (owner && !owner.isBot && owner.alive && !owner.isDefusing && !owner.isPlanting) this.operate(owner, d.id);
       }
     }
   }

@@ -132,6 +132,30 @@ now supplement the procedural materials; see [ASSETS.md](ASSETS.md).
   surfaces. Characters have soft contact shadows under baked lighting, which grow while
   airborne.
 
+## Combat effects (v1.7.7)
+
+- **Tracers** are camera-facing streaks drawn in one batch: a white-hot core inside a warm glow,
+  about two pixels wide at any range. They fade in over the first few metres, so your own fire
+  never smears across the sights. (GL lines were one pixel wide whatever the resolution.)
+- **Muzzle flashes** of other players are drawn in the world: a hot core, sparks thrown forward
+  and a wisp of smoke. A suppressor or flash hider all but hides them.
+- **Spent casings.** A fixed pool of 56 instanced casings arcs out of the gun, bounces once or
+  twice on the floor and lies there for a few seconds. Pistols and SMGs throw small brass,
+  shotguns red hulls; pump and bolt actions eject when the action is cycled. Your own brass
+  lands beside you, and the view model keeps its close-up casings.
+- **Explosions** add a white-hot fireball, flying debris, a pressure-wave shell and a scorch mark
+  on the floor that lasts 45 s or until the next round.
+- **Draw order.** The fireball glows through its own smoke, while smoke grenade clouds still
+  cover sparks and tracers behind them, so a muzzle flash inside a smoke gives nobody away.
+- **Impacts** knock loose chips that fall under gravity: masonry flakes, wood splinters and
+  glass fragments. Hard landings and slides kick up dust.
+- **View model.** Each shot also twists the gun a little to a random side, so a spray never looks
+  like one canned bounce. Standing still at the hip, the gun rides your breathing. An empty
+  pistol holds its slide open (a rifle its bolt) until the new magazine is seated.
+- **Death camera.** It no longer drifts through a wall or ceiling next to where you fell.
+- **Audio cost.** Every layer of a sound now shares one panner. A gunshot has five layers, so a
+  firefight builds a fraction of the audio nodes it used to.
+
 ## Verification
 
 `npm run build` checks TypeScript and builds the production bundle. `npm test` covers

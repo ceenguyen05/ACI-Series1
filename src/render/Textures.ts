@@ -530,6 +530,25 @@ export function bulletHole(): Texture {
   }).tex;
 }
 
+/** Scorch mark left on the floor by an explosion: a burnt core with soot streaks thrown outward. */
+export function scorchMark(): Texture {
+  return make('scorch', 128, 1, 1, (g, w, h, r) => {
+    g.clearRect(0, 0, w, h);
+    const core = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+    core.addColorStop(0, 'rgba(8,7,6,0.92)'); core.addColorStop(0.3, 'rgba(14,12,10,0.8)');
+    core.addColorStop(0.62, 'rgba(24,20,17,0.36)'); core.addColorStop(1, 'rgba(30,26,22,0)');
+    g.fillStyle = core; g.fillRect(0, 0, w, h);
+    g.lineCap = 'round';
+    for (let i = 0; i < 64; i++) {
+      const ang = r.range(0, Math.PI * 2), d0 = r.range(0.06, 0.2) * w, d1 = r.range(0.24, 0.46) * w;
+      g.strokeStyle = `rgba(10,9,8,${r.range(0.06, 0.24).toFixed(2)})`;
+      g.lineWidth = r.range(1, 3.2);
+      g.beginPath(); g.moveTo(w / 2 + Math.cos(ang) * d0, h / 2 + Math.sin(ang) * d0);
+      g.lineTo(w / 2 + Math.cos(ang) * d1, h / 2 + Math.sin(ang) * d1); g.stroke();
+    }
+  }).tex;
+}
+
 /** Blood splatter decal: a dark core with droplets flung in one direction. */
 export function bloodSplat(): Texture {
   return make('blood', 128, 1, 1, (g, w, h, r) => {

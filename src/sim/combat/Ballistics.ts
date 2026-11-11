@@ -97,7 +97,8 @@ export function traceBullet(ctx: SimContext, ignore: Agent | null, origin: Vecto
 /** Current total inaccuracy (radians) for an agent firing `def`. */
 export function inaccuracy(def: WeaponDef, a: Agent): number {
   const s = def.spread;
-  let v = a.crouched ? s.crouch : s.stand;
+  // Attachments' hip-fire change (lasers, barrels) applies only away from the sights.
+  let v = (a.crouched ? s.crouch : s.stand) * (a.wpn.ads || a.wpn.scope > 0 ? 1 : s.hip ?? 1);
   // A settled prone stance is steadier; crawling, dropping down and sliding cost accuracy.
   v *= 1 - a.motor.prone * 0.2;
   v += s.move * (a.motor.slidePose * 0.8 + Math.sin(a.motor.prone * Math.PI) * 0.5);

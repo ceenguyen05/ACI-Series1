@@ -95,7 +95,11 @@ export class ZombiesEndScreen {
     const me = m.player;
     const won = m.won;
     const title = won ? 'EXFIL SUCCESSFUL' : 'GAME OVER';
-    const sub = won ? `You escaped ACI HQ after ${m.wave} waves` : `You survived ${Math.max(0, m.wave - (m.wavePhase === 'intermission' ? 0 : 1))} wave${m.wave === 2 ? '' : 's'} — fell on wave ${m.wave}`;
+    // (the game is already over here, so the wave phase can't tell a cleared wave from a lost one).
+    // Waves cleared is always this wave or the one before; the floor covers a server that doesn't send it yet.
+    const cleared = Math.max(0, Math.min(m.wave, Math.max(m.wavesCleared ?? 0, m.wave - 1)));
+    const sub = won ? `You escaped ACI HQ after ${m.wave} waves`
+      : `You survived ${cleared} wave${cleared === 1 ? '' : 's'} — ${cleared >= m.wave ? `fell before wave ${m.wave + 1}` : `fell on wave ${m.wave}`}`;
     const rows = [...m.humans].sort((a, b) => b.zp!.stats.kills - a.zp!.stats.kills);
     this.el = h('div', { class: 'overlay-dim z-end' },
       h('div', { class: 'match-end panel z-end-panel' },
