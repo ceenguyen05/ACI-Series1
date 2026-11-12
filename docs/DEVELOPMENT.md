@@ -26,7 +26,7 @@ ACI-SND/
 ├─ .github/
 │  ├─ workflows/ci.yml     # typecheck, tests, build, browser boot check (every push / PR)
 │  ├─ workflows/deploy.yml # CI, then publish to GitHub Pages (push to main)
-│  └─ ISSUE_TEMPLATE/, pull_request_template.md, dependabot.yml, CODEOWNERS
+│  └─ ISSUE_TEMPLATE/, pull_request_template.md, CODEOWNERS
 ├─ index.html              # page shell (canvas + UI root)
 ├─ Dockerfile, render.yaml # game server container / Render Blueprint (see docs/ONLINE_DEPLOYMENT.md)
 ├─ .env.example            # every server and build setting, documented

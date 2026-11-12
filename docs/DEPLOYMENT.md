@@ -94,8 +94,8 @@ Add `--swiftshader` to any of them to force software rendering, as CI does.
 2. *(Recommended)* **Protect `main`:** Settings → Branches (or Rules → Rulesets) → require a
    pull request and require the status checks **"Typecheck, tests and build"** and **"Browser
    boot check"**. Then broken code can't reach `main` (and the live site) at all.
-3. *(Optional)* **Dependabot** is already configured (`.github/dependabot.yml`). It opens
-   weekly npm and monthly GitHub Actions update PRs, and each one runs CI.
+
+Dependency updates are managed manually; automated Dependabot update PRs are disabled.
 
 No secrets or tokens are needed. The workflows use the built-in `GITHUB_TOKEN` with the
 minimum permissions: `contents: read`, plus `pages: write` / `id-token: write` only for the
@@ -148,7 +148,6 @@ The build uses relative asset paths (`base: './'` in `vite.config.ts`), so it wo
 │  └─ deploy.yml           # CI gate → GitHub Pages deploy
 ├─ ISSUE_TEMPLATE/         # bug report / feature idea forms
 ├─ pull_request_template.md
-├─ dependabot.yml          # weekly npm / monthly Actions updates
 └─ CODEOWNERS
 scripts/
 ├─ checks/boot-check.mjs   # deploy boot check (CI)
